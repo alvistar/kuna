@@ -1187,7 +1187,8 @@ fn descend(
 
             for &target in &c.flows {
                 let kind = if c.flow.is_call { XrefKind::Call } else { XrefKind::Jump };
-                if Some(target) == condition.take_if(|&mut skip| skip == target) {
+                if condition == Some(target) {
+                    condition = None;
                     if c.fall_through.is_none() {
                         if text.is_empty() {
                             text = assembly(translate, vma, &code_space);
