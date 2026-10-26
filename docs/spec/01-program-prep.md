@@ -6211,7 +6211,10 @@ the final entry set (seeds, prologue roots, entries found from calls, focus and
 gap-walk entries), so the order in which it finds an entry cannot change the
 answer. A conditional branch whose label is the next instruction (`bne` to the
 next line) is a `CBRANCH` and nothing after it, so it keeps its `Jump`, as in
-Ghidra, where its target is an operand, not `inst_next`. A predicated
+Ghidra, where its target is an operand, not `inst_next`. A predicated branch
+whose label is the next instruction (`it eq; beq.w` to the next line) lifts to
+the skip and then the branch, both to the next instruction; only the first is
+the skip, and the branch keeps its `Jump`. A predicated
 instruction with no ops of its own after the skip would keep its row too. The
 rule applies to ARM images only (A32 and Thumb). The same `goto inst_next` comes
 ahead of the ops of x86 `cmovcc` and `rep` string instructions, AArch64 `ccmp`,

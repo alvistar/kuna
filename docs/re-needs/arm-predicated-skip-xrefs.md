@@ -124,3 +124,4 @@ _not yet refuted_
 - a skip that runs into another known function's entry keeps its row: the call graph reads it as a way into that function, and dropping it changed `decompile-all` output (anonymous struct numbering in 62 musl `libc.so` functions)
 - the rule is ARM-only: the same `goto inst_next` skip of x86 `cmovcc`/`rep`, AArch64 `ccmp`/`fcsel`, PPC `beqlr`, MIPS `bc1t` and the SPARC `call` keeps its row; cleaning those up is a separate change
 - the cross-entry rule is decided after the walk over every entry it found (the first version checked only the seeds, so a skip into an entry found from a call lost its row on a stripped image); `xreffp_strip_arm_le32` covers it
+- only the first flow equal to the skip is the skip: a predicated branch to the next instruction (`it eq; beq.w`, flows `[next, next]`) keeps the branch's row

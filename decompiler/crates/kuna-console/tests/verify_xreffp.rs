@@ -181,3 +181,13 @@ fn a_dispatch_skip_into_an_entry_keeps_its_jump() {
         assert!(jumps.contains(&(entry, XrefKind::Jump)), "{jumps:?}");
     }
 }
+
+/// A real branch to the next instruction inside an `it` block (`it eq;
+/// beq.w`) lifts to the condition skip and the branch, both to the next
+/// instruction: the skip files no row and the branch keeps its jump.
+#[test]
+fn a_predicated_branch_to_the_next_instruction_keeps_its_jump() {
+    let idx = build("xreffp_strip_arm_le32");
+    let rows: Vec<_> = idx.refs_from_instruction(0x100a8).iter().map(|r| (r.to, r.kind, r.instruction.clone())).collect();
+    assert_eq!(rows, vec![(0x100ac, XrefKind::Jump, "b.eq.w 0x100ac".to_string())]);
+}
