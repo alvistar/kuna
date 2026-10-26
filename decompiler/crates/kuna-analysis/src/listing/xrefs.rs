@@ -79,6 +79,7 @@ use super::classify::classify;
 use super::context::ContextPainter;
 use super::kuna_picbase::{self, Ctx as PicCtx, PicBase};
 use super::kuna_picpool::{self, GotImage, Insn, PicPool};
+use super::kuna_pltstub::PltStubs;
 use super::kuna_poolref::PoolImage;
 use super::kuna_switchtable;
 use super::model::{FlowKind, RawOp};
@@ -766,6 +767,7 @@ fn descend(
 
     // Reused across every decode in the walk (see [`FullCapture`]).
     let mut cap = FullCapture::default();
+    let mut plt_stubs = PltStubs::default();
     let mut raw: Vec<RawOp> = Vec::new();
 
     // Share the decoded partition with prologue recovery and AIF.
@@ -1116,6 +1118,9 @@ fn descend(
                 let fall_through = vma.wrapping_add(len as u64);
                 data_refs(cap.ops(), data_space.as_ref(), &mapped, fall_through, pool.as_ref())
             };
+            // (kuna) `pltstub`: a PLT stub's partial sums are not references,
+            // its slot is. See [`super::kuna_pltstub`].
+            plt_stubs.rewrite(translate, &code_space, data_space.as_ref(), vma, len, cap.ops(), &mut drefs);
             // (kuna) `picpool`: the address a PC-relative literal-pool pair forms,
             // which is in neither of its two instructions on its own. See
             // [`super::kuna_picpool`].

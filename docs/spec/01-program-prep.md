@@ -6169,6 +6169,26 @@ nothing, even when every path brings the same offset. And code that a function w
 later reaches by jumping into a body already walked is not part of that body's
 meet.
 
+(kuna) **PLT stubs.** A GNU ld A32 PLT entry builds its GOT slot's address in
+`ip` and jumps through it: `add ip,pc,#0,12` (SLEIGH renders it `adr r12,...`),
+`add ip,ip,#N,20` (one more add with `--long-plt`), then `ldr pc,[ip,#M]!`. The
+constant scan reads each step on its own, so it filed the PC value as a `Data`
+row, and also `N<<12` once the GOT lies far enough from the stub for that
+immediate to land in a mapped section: two rows per stub, neither an address the
+stub uses. The walk now recognises the chain from its first instruction
+(`decompiler/crates/kuna-analysis/src/listing/kuna_pltstub.rs`): one register set
+to a constant, one or two further instructions that only add constants to it,
+then a load through it plus a constant whose value is the target of a
+`BRANCHIND`. Only `COPY`, `INT_ADD` and `INT_SUB` of constants are evaluated, and
+a middle step must neither touch memory nor branch. The chain's instructions file
+no constant `Data` row, and the load files the slot as a `Read`, which is what
+IDA reports for the stub and what an x86 stub's `jmp [slot]` already gives; the
+slot's file word (the PLT's resolver) is not followed. The calls into the stub,
+and its import name, are unchanged. A run that leaves the shape at any step keeps
+the rows the constant scan gives it, so an `adr` whose register is then used any
+other way is still a reference. GCC 14 for armhf emits the A32 stub for Thumb code
+too; the Thumb-only PLT (`--thumb-plt`, M-profile) is not recognised.
+
 (kuna) Every rule above widens what the walk reads out of an instruction it
 reached; the complementary defect is the instructions it never reaches at all.
 The descent's successors are `classify`'s static targets plus fall-through, and a
