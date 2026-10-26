@@ -771,7 +771,7 @@ fn descend(
     // Reused across every decode in the walk (see [`FullCapture`]).
     let mut cap = FullCapture::default();
     let arm = file.architecture() == object::Architecture::Arm;
-    let mut plt_stubs = arm.then(|| PltStubs::new(data_space.as_ref(), &mapped));
+    let mut plt_stubs = arm.then(|| PltStubs::for_file(file, data_space.as_ref(), &mapped)).flatten();
     let mut raw: Vec<RawOp> = Vec::new();
 
     // Share the decoded partition with prologue recovery and AIF.

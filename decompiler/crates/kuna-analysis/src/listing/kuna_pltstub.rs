@@ -26,6 +26,11 @@
 //! of constants, so no other instruction shape matches, and a run that leaves
 //! the shape at any step keeps the rows the generic rule gives it.
 //!
+//! Chains run only inside the image's `.plt` and `.plt.sec` sections, where the
+//! linker puts its stubs; an image without section headers follows none, since
+//! nothing says where its stubs are. Code elsewhere built the same way (a
+//! hand-written `adr; add; ldr pc` veneer) keeps its rows.
+//!
 //! The chain is followed in the walk's own order: each instruction is the one
 //! the walk decoded, in the mode it chose, and a chain waits for the walk to
 //! decode the instruction at its fall-through. The constant rows of a chain
@@ -36,6 +41,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use kuna_base::space::{spacetype, AddrSpace};
+use object::{Object, ObjectSection};
 use kuna_num::opcodes::OpCode;
 use kuna_num::pcoderaw::VarnodeData;
 
@@ -64,12 +70,31 @@ pub(super) struct PltStubs<'a> {
     data_space: Option<&'a Rc<AddrSpace>>,
     /// The mapped ranges a slot must lie in.
     mapped: &'a [(u64, u64)],
+    /// The `.plt` and `.plt.sec` ranges, sorted: the only place a chain runs.
+    plt: Vec<(u64, u64)>,
     open: HashMap<u64, Chain>,
 }
 
 impl<'a> PltStubs<'a> {
-    pub(super) fn new(data_space: Option<&'a Rc<AddrSpace>>, mapped: &'a [(u64, u64)]) -> Self {
-        PltStubs { data_space, mapped, open: HashMap::new() }
+    pub(super) fn new(data_space: Option<&'a Rc<AddrSpace>>, mapped: &'a [(u64, u64)], mut plt: Vec<(u64, u64)>) -> Self {
+        plt.sort_unstable();
+        PltStubs { data_space, mapped, plt, open: HashMap::new() }
+    }
+
+    /// The matcher for `file`, or `None` when it has no `.plt`/`.plt.sec`
+    /// section: without section headers the stubs' extent is unknown, so no
+    /// chain is followed and every row stays as the constant scan files it.
+    pub(super) fn for_file(
+        file: &object::File,
+        data_space: Option<&'a Rc<AddrSpace>>,
+        mapped: &'a [(u64, u64)],
+    ) -> Option<Self> {
+        let plt: Vec<(u64, u64)> = file
+            .sections()
+            .filter(|s| matches!(s.name(), Ok(".plt" | ".plt.sec")) && s.size() > 0)
+            .map(|s| (s.address(), s.address() + s.size()))
+            .collect();
+        (!plt.is_empty()).then(|| Self::new(data_space, mapped, plt))
     }
 
     /// Take the instruction at `vma` (`len` bytes, lifted to `ops`, rendered
@@ -85,6 +110,9 @@ impl<'a> PltStubs<'a> {
         drefs: &mut Vec<(u64, XrefKind)>,
         text: &str,
     ) -> Vec<Held> {
+        if !in_range(&self.plt, vma) {
+            return self.open.remove(&vma).map(|chain| chain.held).unwrap_or_default();
+        }
         let next = vma.wrapping_add(u64::from(len));
         let mut released = Vec::new();
         if let Some(mut chain) = self.open.remove(&vma) {
@@ -326,6 +354,8 @@ mod tests {
     }
 
     const MAPPED: &[(u64, u64)] = &[(0x1000, 0x2000), (0x100000, 0x104000)];
+    /// The `.plt` the stubs of these tests lie in.
+    const PLT: &[(u64, u64)] = &[(0x1000, 0x3000)];
     const IP: u64 = 0x50;
     const PC: u64 = 0x5c;
 
@@ -367,7 +397,7 @@ mod tests {
     fn a_chain_starts_whatever_its_first_value_maps_to() {
         let s = spaces();
         assert!(!in_range(MAPPED, 0x3008));
-        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED, PLT.to_vec());
         assert_eq!(step(&mut stubs, 0x1000, &adr(&s, 0x3008), &[]), (vec![], vec![]));
         assert_eq!(step(&mut stubs, 0x1004, &add(&s, 0x100000), &[(0x100000, XrefKind::Data)]), (vec![], vec![]));
         assert_eq!(step(&mut stubs, 0x1008, &ldr_pc(&s, 0x10), &[]), (vec![(0x103018, XrefKind::Read)], vec![]));
@@ -378,7 +408,7 @@ mod tests {
     #[test]
     fn a_broken_chain_files_its_rows() {
         let s = spaces();
-        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED, PLT.to_vec());
         assert_eq!(step(&mut stubs, 0x1000, &adr(&s, 0x2000), &[(0x2000, XrefKind::Data)]), (vec![], vec![]));
         let store = vec![op(OpCode::CPUI_STORE, None, vec![vn(&s.konst, 3, 8), vn(&s.reg, IP, 4), vn(&s.reg, 0, 4)])];
         let (rows, released) = step(&mut stubs, 0x1004, &store, &[]);
@@ -393,7 +423,7 @@ mod tests {
     #[test]
     fn an_overwrite_is_not_an_add() {
         let s = spaces();
-        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED, PLT.to_vec());
         step(&mut stubs, 0x1000, &adr(&s, 0x1800), &[(0x1800, XrefKind::Data)]);
         let (_, released) = step(&mut stubs, 0x1004, &adr(&s, 0x101000), &[(0x101000, XrefKind::Data)]);
         assert_eq!(released, vec![(0x1000, 0x1800, "text".to_string())]);
@@ -407,7 +437,7 @@ mod tests {
     #[test]
     fn the_slot_is_the_word_the_jump_takes() {
         let s = spaces();
-        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED, PLT.to_vec());
         let r0 = vn(&s.reg, 0x20, 4);
         let at = vn(&s.uniq, 0x100, 4);
         let ldm = vec![
@@ -427,7 +457,7 @@ mod tests {
     #[test]
     fn a_reloaded_register_names_no_slot() {
         let s = spaces();
-        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED, PLT.to_vec());
         let reload = vec![
             op(OpCode::CPUI_LOAD, Some(vn(&s.reg, IP, 4)), vec![vn(&s.konst, 3, 8), vn(&s.reg, IP, 4)]),
             op(OpCode::CPUI_LOAD, Some(vn(&s.reg, PC, 4)), vec![vn(&s.konst, 3, 8), vn(&s.reg, IP, 4)]),
@@ -440,12 +470,26 @@ mod tests {
         assert_eq!(released, vec![(0x1000, 0x1008, "text".to_string()), (0x1004, 0x100000, "text".to_string())]);
     }
 
+    /// A veneer outside the `.plt` built like a stub (`adr; add; ldr pc`) is
+    /// not one: each instruction keeps its rows and the load files no slot.
+    #[test]
+    fn a_veneer_outside_the_plt_keeps_its_rows() {
+        let s = spaces();
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED, PLT.to_vec());
+        let adr_rows = [(0x1800, XrefKind::Data)];
+        assert_eq!(step(&mut stubs, 0x4000, &adr(&s, 0x1800), &adr_rows), (adr_rows.to_vec(), vec![]));
+        let add_rows = [(0x100000, XrefKind::Data)];
+        assert_eq!(step(&mut stubs, 0x4004, &add(&s, 0x100000), &add_rows), (add_rows.to_vec(), vec![]));
+        assert_eq!(step(&mut stubs, 0x4008, &ldr_pc(&s, 0x10), &[]), (vec![], vec![]));
+        assert!(stubs.drain().is_empty());
+    }
+
     /// A chain whose slot is in no mapped section is not a stub: it files no
     /// `Read` and keeps the rows the generic rule gave it.
     #[test]
     fn an_unmapped_slot_is_no_stub() {
         let s = spaces();
-        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED, PLT.to_vec());
         step(&mut stubs, 0x1000, &adr(&s, 0x1008), &[(0x1008, XrefKind::Data)]);
         step(&mut stubs, 0x1004, &add(&s, 0x100000), &[(0x100000, XrefKind::Data)]);
         let (rows, released) = step(&mut stubs, 0x1008, &ldr_pc(&s, 0x4000), &[]);

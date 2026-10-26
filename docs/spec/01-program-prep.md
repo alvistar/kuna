@@ -6179,7 +6179,11 @@ stub uses. The walk now follows the chain in its own order
 (`decompiler/crates/kuna-analysis/src/listing/kuna_pltstub.rs`): each step is the
 instruction the walk decoded, in the mode it chose, and an open chain waits for
 the walk to decode its fall-through; it never decodes ahead. It runs on ARM images
-only. Any instruction that sets one register to a constant starts a chain,
+only, and only on instructions inside the `.plt` and `.plt.sec` sections, where
+the linker puts its stubs: a hand-written `adr; add; ldr pc` veneer elsewhere
+keeps its rows, and an image without section headers follows no chain, since
+nothing there says where the stubs are. Any such instruction that sets one
+register to a constant starts a chain,
 whether or not that first value lands in a mapped section (a stub far from its
 GOT can have its `pc + N<<20` in a gap between segments). A chain is one register set
 to a constant, one or two further instructions that only add constants to it
