@@ -107,12 +107,10 @@ impl<'a> PltStubs<'a> {
             }
             released = chain.held;
         }
-        if drefs.iter().any(|&(_, kind)| kind == XrefKind::Data) {
-            if let Some((reg, value)) = Values::new(self.data_space).single_write(ops) {
-                let mut chain = Chain { reg, value, adds: 0, held: Vec::new() };
-                hold(&mut chain.held, vma, drefs, text);
-                released.extend(self.open.insert(next, chain).into_iter().flat_map(|c| c.held));
-            }
+        if let Some((reg, value)) = Values::new(self.data_space).single_write(ops) {
+            let mut chain = Chain { reg, value, adds: 0, held: Vec::new() };
+            hold(&mut chain.held, vma, drefs, text);
+            released.extend(self.open.insert(next, chain).into_iter().flat_map(|c| c.held));
         }
         released
     }
@@ -261,4 +259,93 @@ fn is_memory_or_flow(opcode: OpCode) -> bool {
             | OpCode::CPUI_CALLOTHER
             | OpCode::CPUI_RETURN
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Spaces {
+        konst: Rc<AddrSpace>,
+        ram: Rc<AddrSpace>,
+        reg: Rc<AddrSpace>,
+        uniq: Rc<AddrSpace>,
+    }
+
+    fn spaces() -> Spaces {
+        Spaces {
+            konst: Rc::new(AddrSpace::new_for_decode(spacetype::IPTR_CONSTANT)),
+            ram: Rc::new(AddrSpace::new_for_decode(spacetype::IPTR_PROCESSOR)),
+            reg: Rc::new(AddrSpace::new_for_decode(spacetype::IPTR_PROCESSOR)),
+            uniq: Rc::new(AddrSpace::new_for_decode(spacetype::IPTR_INTERNAL)),
+        }
+    }
+
+    fn vn(space: &Rc<AddrSpace>, offset: u64, size: u32) -> VarnodeData {
+        VarnodeData { space: Some(Rc::clone(space)), offset, size }
+    }
+
+    fn op(opcode: OpCode, out: Option<VarnodeData>, ins: Vec<VarnodeData>) -> FullOp {
+        FullOp { opcode, out, ins }
+    }
+
+    const IP: u64 = 0x50;
+    const PC: u64 = 0x5c;
+
+    /// `add ip,pc,#0` as the ARM SLEIGH lifts it: a copy of `pc + 8`.
+    fn adr(s: &Spaces, value: u64) -> Vec<FullOp> {
+        vec![op(OpCode::CPUI_COPY, Some(vn(&s.reg, IP, 4)), vec![vn(&s.konst, value, 4)])]
+    }
+
+    /// `add ip,ip,#imm`, with one of the flag ops it also computes.
+    fn add(s: &Spaces, imm: u64) -> Vec<FullOp> {
+        vec![
+            op(OpCode::CPUI_INT_CARRY, Some(vn(&s.reg, 0x66, 1)), vec![vn(&s.reg, IP, 4), vn(&s.konst, imm, 4)]),
+            op(OpCode::CPUI_INT_ADD, Some(vn(&s.reg, IP, 4)), vec![vn(&s.reg, IP, 4), vn(&s.konst, imm, 4)]),
+        ]
+    }
+
+    /// `ldr pc,[ip,#imm]!`: the load, the Thumb bit cleared, the jump.
+    fn ldr_pc(s: &Spaces, imm: u64) -> Vec<FullOp> {
+        let loaded = vn(&s.uniq, 0xa7300, 4);
+        vec![
+            op(OpCode::CPUI_INT_ADD, Some(vn(&s.reg, IP, 4)), vec![vn(&s.reg, IP, 4), vn(&s.konst, imm, 4)]),
+            op(OpCode::CPUI_LOAD, Some(loaded.clone()), vec![vn(&s.konst, 3, 8), vn(&s.reg, IP, 4)]),
+            op(OpCode::CPUI_INT_AND, Some(vn(&s.reg, PC, 4)), vec![loaded, vn(&s.konst, 0xffff_fffe, 4)]),
+            op(OpCode::CPUI_BRANCHIND, None, vec![vn(&s.reg, PC, 4)]),
+        ]
+    }
+
+    /// Drive one instruction, returning its rows and the rows released.
+    fn step(stubs: &mut PltStubs, vma: u64, ops: &[FullOp], drefs: &[(u64, XrefKind)]) -> (Vec<(u64, XrefKind)>, Vec<Held>) {
+        let mut drefs = drefs.to_vec();
+        let released = stubs.step(vma, 4, ops, &mut drefs, "text");
+        (drefs, released)
+    }
+
+    /// A stub whose first partial sum falls in an unmapped gap (so it files no
+    /// row of its own) is still recognised: the mapped immediate the next
+    /// instruction adds files nothing, and the load files the slot.
+    #[test]
+    fn a_chain_starts_whatever_its_first_value_maps_to() {
+        let s = spaces();
+        let mut stubs = PltStubs::new(Some(&s.ram));
+        assert_eq!(step(&mut stubs, 0x1000, &adr(&s, 0x1008), &[]), (vec![], vec![]));
+        assert_eq!(step(&mut stubs, 0x1004, &add(&s, 0x100000), &[(0x100000, XrefKind::Data)]), (vec![], vec![]));
+        assert_eq!(step(&mut stubs, 0x1008, &ldr_pc(&s, 0x10), &[]), (vec![(0x101018, XrefKind::Read)], vec![]));
+        assert!(stubs.drain().is_empty());
+    }
+
+    /// A run that leaves the shape files the rows it held, as they were.
+    #[test]
+    fn a_broken_chain_files_its_rows() {
+        let s = spaces();
+        let mut stubs = PltStubs::new(Some(&s.ram));
+        assert_eq!(step(&mut stubs, 0x1000, &adr(&s, 0x2000), &[(0x2000, XrefKind::Data)]), (vec![], vec![]));
+        let store = vec![op(OpCode::CPUI_STORE, None, vec![vn(&s.konst, 3, 8), vn(&s.reg, IP, 4), vn(&s.reg, 0, 4)])];
+        let (rows, released) = step(&mut stubs, 0x1004, &store, &[]);
+        assert_eq!((rows, released), (vec![], vec![(0x1000, 0x2000, "text".to_string())]));
+        step(&mut stubs, 0x2000, &adr(&s, 0x3000), &[(0x3000, XrefKind::Data)]);
+        assert_eq!(stubs.drain(), vec![(0x2000, 0x3000, "text".to_string())]);
+    }
 }

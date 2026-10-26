@@ -6179,7 +6179,9 @@ stub uses. The walk now follows the chain in its own order
 (`decompiler/crates/kuna-analysis/src/listing/kuna_pltstub.rs`): each step is the
 instruction the walk decoded, in the mode it chose, and an open chain waits for
 the walk to decode its fall-through; it never decodes ahead. It runs on ARM images
-only. A chain is one register set
+only. Any instruction that sets one register to a constant starts a chain,
+whether or not that first value lands in a mapped section (a stub far from its
+GOT can have its `pc + N<<20` in a gap between segments). A chain is one register set
 to a constant, one or two further instructions that only add constants to it,
 then a load through it plus a constant whose value is the target of a
 `BRANCHIND`. Only `COPY`, `INT_ADD` and `INT_SUB` of constants are evaluated, and
