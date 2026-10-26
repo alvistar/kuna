@@ -303,7 +303,7 @@ mod tests {
         FullOp { opcode, out, ins }
     }
 
-    const MAPPED: &[(u64, u64)] = &[(0x1000, 0x2000), (0x100000, 0x102000)];
+    const MAPPED: &[(u64, u64)] = &[(0x1000, 0x2000), (0x100000, 0x104000)];
     const IP: u64 = 0x50;
     const PC: u64 = 0x5c;
 
@@ -344,10 +344,11 @@ mod tests {
     #[test]
     fn a_chain_starts_whatever_its_first_value_maps_to() {
         let s = spaces();
+        assert!(!in_range(MAPPED, 0x3008));
         let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
-        assert_eq!(step(&mut stubs, 0x1000, &adr(&s, 0x1008), &[]), (vec![], vec![]));
+        assert_eq!(step(&mut stubs, 0x1000, &adr(&s, 0x3008), &[]), (vec![], vec![]));
         assert_eq!(step(&mut stubs, 0x1004, &add(&s, 0x100000), &[(0x100000, XrefKind::Data)]), (vec![], vec![]));
-        assert_eq!(step(&mut stubs, 0x1008, &ldr_pc(&s, 0x10), &[]), (vec![(0x101018, XrefKind::Read)], vec![]));
+        assert_eq!(step(&mut stubs, 0x1008, &ldr_pc(&s, 0x10), &[]), (vec![(0x103018, XrefKind::Read)], vec![]));
         assert!(stubs.drain().is_empty());
     }
 
