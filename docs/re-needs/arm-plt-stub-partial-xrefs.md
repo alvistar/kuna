@@ -13,7 +13,7 @@ challenges: []
 rounds: []
 first_seen_round: null
 attempts: 0
-covered_by_option: null
+covered_by_option: armpltslot
 touches: [decompiler/crates/kuna-analysis/src/listing/xrefs.rs, decompiler/crates/kuna-analysis/src/listing/kuna_pltstub.rs]
 scope: small
 regression_of: null
@@ -138,3 +138,5 @@ _not yet refuted_
 - the walk recognises `reg = constant`, one or two `reg += constant`, then a `BRANCHIND` through a load of `reg + constant`; the chain files no constant data row and the load files the slot as a read; the slot's word (the PLT resolver) is not followed
 - the matcher follows the chain as the walk decodes it (rows of an open chain held, released when it breaks or the body drains) instead of decoding ahead, so it uses the walk's mode selection and commits no context out of order
 - a chain starts on any constant register write (not only one whose value is mapped); the slot is the word the `BRANCHIND` consumes and must be mapped; the matcher runs on ARM only
+- a chain's add must be computed from its register (`mov ip,#K` breaks it); a reloaded register names no slot; chains run only inside `.plt`/`.plt.sec`, and an image without section headers follows none
+- gated behind `armpltslot` (default on): the change renumbers anonymous structs in some functions of large ARM images, so it ships as an option; off gives the earlier rows and `decompile-all` output byte for byte

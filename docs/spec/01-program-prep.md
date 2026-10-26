@@ -6169,7 +6169,7 @@ nothing, even when every path brings the same offset. And code that a function w
 later reaches by jumping into a body already walked is not part of that body's
 meet.
 
-(kuna) **PLT stubs.** A GNU ld A32 PLT entry builds its GOT slot's address in
+(kuna) **PLT stubs** (`armpltslot`, default on). A GNU ld A32 PLT entry builds its GOT slot's address in
 `ip` and jumps through it: `add ip,pc,#0,12` (SLEIGH renders it `adr r12,...`),
 `add ip,ip,#N,20` (one more add with `--long-plt`), then `ldr pc,[ip,#M]!`. The
 constant scan reads each step on its own, so it filed the PC value as a `Data`
@@ -6201,8 +6201,14 @@ and its import name, are unchanged. A run that leaves the shape at any step keep
 the rows the constant scan gives it, so an `adr` whose register is then used any
 other way is still a reference. GCC 14 for armhf emits the A32 stub for Thumb code
 too; the Thumb-only PLT (`--thumb-plt`, M-profile) is not recognised.
+`--option armpltslot off` follows no chain, so every stub files the constant
+scan's rows again. The call graph reads the reference rows, and the analyses
+that read it number anonymous structs in a different order once those rows go:
+on musl `libstdc++.so` for ARM, 272 functions name their anonymous structs
+differently with the option on (`struct_4` becomes `struct_0`), and their code
+is otherwise identical. Off gives the earlier output byte for byte.
 
-(kuna) **Condition skips.** SLEIGH lifts a predicated instruction (`ldrne`,
+(kuna) **Condition skips** (`armcondskip`, default on). SLEIGH lifts a predicated instruction (`ldrne`,
 `moveq`, `popeq {..,pc}`, `bxne r3`, an instruction in a Thumb `it` block) to a
 `CBRANCH` to the next instruction ahead of its own ops: the path where the
 condition fails. The reference walk filed that `CBRANCH` as a `Jump` to the next
@@ -6238,7 +6244,12 @@ rule applies to ARM images only (A32 and Thumb). The same `goto inst_next` comes
 ahead of the ops of x86 `cmovcc` and `rep` string instructions, AArch64 `ccmp`,
 `ccmn`, `fcmp` and `fcsel`, PowerPC conditional returns (`beqlr`), MIPS `bc1t`
 and the SPARC `call`, and on those architectures each still files a `Jump` to its
-own fall-through.
+own fall-through. `--option armcondskip off` gives the earlier rule on ARM too:
+every skip files its `Jump`, except the predicated skip of an A32 table dispatch
+whose table `armframes` reads. As with `armpltslot`, the rows the call graph
+reads change the numbering of anonymous structs in some functions (62 functions
+of musl `libc.so` for ARM, with otherwise identical code); off gives the earlier
+output byte for byte.
 
 (kuna) Every rule above widens what the walk reads out of an instruction it
 reached; the complementary defect is the instructions it never reaches at all.

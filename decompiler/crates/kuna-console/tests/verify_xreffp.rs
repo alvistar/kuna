@@ -212,3 +212,32 @@ fn a_kept_thumb_skip_is_rendered_as_the_walk_decoded_it() {
 fn armframes_on(arch: &mut Architecture) {
     arch.set_kuna_option("armframes", "on").expect("armframes flips on");
 }
+
+/// `armpltslot off` restores the constant scan's rows: each stub's `adr`
+/// files the PC value and its `add` the mapped immediate, and the load files
+/// no slot.
+#[test]
+fn armpltslot_off_files_the_partial_sums() {
+    let idx = build_with("xreffp_arm_le32", |arch| {
+        arch.set_kuna_option("armpltslot", "off").expect("armpltslot flips off");
+    });
+    for (stub, slot) in STUBS {
+        assert_eq!(from(&idx, stub), vec![(stub + 8, XrefKind::Data)], "{stub:#x}");
+        assert_eq!(from(&idx, stub + 4), vec![(STUB_ADD, XrefKind::Data)], "{stub:#x}");
+        assert!(!from(&idx, stub + 8).contains(&(slot, XrefKind::Read)), "{stub:#x}");
+    }
+}
+
+/// `armcondskip off` restores a jump from every predicated instruction to the
+/// next one, and from a skip that falls through into an entry.
+#[test]
+fn armcondskip_off_files_every_skip() {
+    let idx = build_with("xreffp_arm_le32", |arch| {
+        arch.set_kuna_option("armcondskip", "off").expect("armcondskip flips off");
+    });
+    for (at, len) in PREDICATED {
+        assert_eq!(from(&idx, at), vec![(at + len, XrefKind::Jump)], "{at:#x}");
+    }
+    let (at, entry) = SKIP_INTO_ENTRY;
+    assert_eq!(from(&idx, at), vec![(entry, XrefKind::Jump)]);
+}

@@ -13,7 +13,7 @@ challenges: []
 rounds: []
 first_seen_round: null
 attempts: 0
-covered_by_option: null
+covered_by_option: armcondskip
 touches: [decompiler/crates/kuna-analysis/src/listing/classify.rs, decompiler/crates/kuna-analysis/src/listing/xrefs.rs]
 scope: small
 regression_of: null
@@ -126,3 +126,4 @@ _not yet refuted_
 - the cross-entry rule is decided after the walk over every entry it found (the first version checked only the seeds, so a skip into an entry found from a call lost its row on a stripped image); `xreffp_strip_arm_le32` covers it
 - only the first flow equal to the skip is the skip: a predicated branch to the next instruction (`it eq; beq.w`, flows `[next, next]`) keeps the branch's row
 - a skip into an entry is kept only from an instruction with no fall-through (`bxne lr`, `ldrne pc`, `addls pc`): a predicated `ldrne`/`moveq`/`andeq` right before an entry reaches it by its fall-through too, so its skip is no way in of its own and files nothing; this renumbers anonymous structs in 62 musl `libc.so` functions, like the PLT rule in `libstdc++.so`
+- gated behind `armcondskip` (default on): the change renumbers anonymous structs in some functions of large ARM images, so it ships as an option; off gives the earlier rows and `decompile-all` output byte for byte
