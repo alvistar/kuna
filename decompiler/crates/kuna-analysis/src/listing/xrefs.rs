@@ -655,9 +655,12 @@ pub fn build_with_focus(
 /// (kuna `armframes`) On an ARM image a computed jump is tried as an A32
 /// `addls pc,pc,rN,lsl #2` / `ldrls pc,[pc,rN,lsl #2]` table
 /// ([`super::kuna_a32switch`]) before any other table read, because its
-/// PC-relative operand names the dispatch itself rather than a table, and the
-/// predicated skip of such a jump, which stays one of its `flows`, files no row
+/// PC-relative operand names the dispatch itself rather than a table
 /// ([`super::classify::Classified::predicated_skip`]).
+///
+/// The skip any predicated instruction lifts to stays one of its `flows` and
+/// is walked, but files no row
+/// ([`super::classify::Classified::condition_skip`]).
 fn descend(
     file: &object::File,
     arch: &Architecture,
@@ -1103,6 +1106,8 @@ fn descend(
             );
             let c = classify(&raw, vma, len);
             let skip = a32_tables.as_ref().and_then(|_| c.predicated_skip(vma, len));
+            let condition = c.condition_skip(vma, len);
+            let leaves = |target: u64| target != entry && seed_set.contains(&target);
             if let Some(fall) = c.fall_through.filter(|_| !waiting.is_empty()) {
                 woken.extend(waiting.remove(&fall).into_iter().flatten());
             }
@@ -1140,7 +1145,7 @@ fn descend(
             });
             // Every row this instruction produces carries the same render, and an
             // instruction that produces none needs no render at all.
-            let mut text = if c.flows.iter().all(|&t| Some(t) == skip) && drefs.is_empty() && pointer.is_none() {
+            let mut text = if c.flows.iter().all(|&t| Some(t) == condition && !leaves(t)) && drefs.is_empty() && pointer.is_none() {
                 String::new()
             } else {
                 assembly(translate, vma, &code_space)
@@ -1155,7 +1160,7 @@ fn descend(
 
             for &target in &c.flows {
                 let kind = if c.flow.is_call { XrefKind::Call } else { XrefKind::Jump };
-                if Some(target) != skip {
+                if Some(target) != skip && (Some(target) != condition || leaves(target)) {
                     st.file(vma, target, kind, &text);
                 }
                 if c.flow.is_call {

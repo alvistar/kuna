@@ -6189,6 +6189,33 @@ the rows the constant scan gives it, so an `adr` whose register is then used any
 other way is still a reference. GCC 14 for armhf emits the A32 stub for Thumb code
 too; the Thumb-only PLT (`--thumb-plt`, M-profile) is not recognised.
 
+(kuna) **Condition skips.** SLEIGH lifts a predicated instruction (`ldrne`,
+`moveq`, `popeq {..,pc}`, `bxne r3`, an instruction in a Thumb `it` block) to a
+`CBRANCH` to the next instruction ahead of its own ops: the path where the
+condition fails. The reference walk filed that `CBRANCH` as a `Jump` to the next
+instruction, one row for every predicated instruction in the program, which no
+other tool reports. Ghidra keeps a `goto inst_next` out of an instruction's
+flows (`SleighInstructionPrototype` gives it `BRANCH_TO_END`, not `JUMPOUT`).
+The resolved p-code no longer says `inst_next`, so `classify` marks the shape
+instead: a `CBRANCH` to the instruction's own fall-through that is followed by
+other ops (`Classified::predicated`, kept in the decode memo). Such a skip
+(`Classified::condition_skip`) stays one of the instruction's flows, so every
+walk still takes it and PIC pool composition, no-return propagation, AIF and the
+Listing walk see the same shape as before; only the reference walk files no row
+for it, unless the skip runs into the entry of another known function (a
+predicated last instruction, or a pool word decoded as `andeq`, right before the
+next function). That edge is a way into the other function, which the call
+graph counts among its callers and tail jumps (`callbacktype`, `calleevote`), so
+it keeps its `Jump`. A conditional branch whose label is the next instruction (`bne` to the
+next line) is a `CBRANCH` and nothing after it, so it keeps its `Jump`, as in
+Ghidra, where its target is an operand, not `inst_next`. A predicated
+instruction with no ops of its own after the skip would keep its row too. The
+rule is not ARM's alone. The same `goto inst_next` comes ahead of the ops of
+x86 `cmovcc` and `rep` string instructions, AArch64 `ccmp`, `ccmn`, `fcmp` and
+`fcsel`, PowerPC conditional returns (`beqlr`), MIPS `bc1t` (whose taken target
+keeps its row) and the SPARC `call` (whose callee keeps its row), and each of
+them loses the row to its own fall-through.
+
 (kuna) Every rule above widens what the walk reads out of an instruction it
 reached; the complementary defect is the instructions it never reaches at all.
 The descent's successors are `classify`'s static targets plus fall-through, and a
@@ -6447,9 +6474,9 @@ function that leaves through `bxne r0` or `bl abort` is proved no-return
 exactly as before. Where A32 tables are read, both walks only recognise the
 skip (`Classified::predicated_skip` in
 `decompiler/crates/kuna-analysis/src/listing/classify.rs`): a computed jump
-whose only flow is its skip is read as a table, and the reference walk files
-no `Jump` row for the skip. Under `armframes off`, and on every other
-architecture, the skip keeps its row and no A32 table is read. The switch record states the guard's case count, so a table longer than
+whose only flow is its skip is read as a table. Under `armframes off`, and on
+every other architecture, no A32 table is read. The skip files no `Jump` row
+under every option (the condition-skip rule below). The switch record states the guard's case count, so a table longer than
 `jumptablemax` is marked truncated. A dispatch whose table gives no case (a run
 shorter than two entries, or `b caseN` slots past the section end) states no
 count, and the other table readers run on it as on any computed jump. A dispatch the walk reaches before the

@@ -1,10 +1,13 @@
 //! End-to-end gate for two ARM false positives of the reference walk: the
-//! partial sums a PLT stub builds its slot's address from.
+//! partial sums a PLT stub builds its slot's address from, and the skip a
+//! predicated instruction lifts to.
 //!
 //! Fixture: `xreffp_arm_le32` (built from `xreffp_arm_le32.c`), a dynamic A32
 //! executable whose imports are called through GNU ld PLT stubs
 //! (`add ip,pc,#0,12; add ip,ip,#0x12000; ldr pc,[ip,#M]!`), with `table`
 //! between the stubs and the GOT so that `0x12000` is a mapped address.
+//! `clamp`, `pick`, `pick_t` (Thumb-2) and `main` hold predicated non-branch
+//! instructions; `next_branch` holds a `bne` to the next instruction.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -20,6 +23,26 @@ const STUB_ADD: u64 = 0x12000;
 const STUB_CALLS: [(u64, u64); 3] = [(0x103c8, 0x10310), (0x10394, 0x1031c), (0x103b4, 0x1034c)];
 /// `main`'s two PC-relative strings: the `add rN,pc,rN` and the string.
 const STRINGS: [(u64, u64); 2] = [(0x10390, 0x10648), (0x103c4, 0x10650)];
+/// Predicated non-branch instructions and their byte lengths: `movle`/`movgt`
+/// in `main`, `movlt`/`movge` in `clamp`, `ldrne`/`ldreq` in `pick`, and the
+/// Thumb-2 `ldrne` in `pick_t`'s `it ne` block.
+const PREDICATED: [(u64, u64); 9] = [
+    (0x1039c, 4),
+    (0x103a0, 4),
+    (0x10550, 4),
+    (0x10558, 4),
+    (0x10564, 4),
+    (0x10568, 4),
+    (0x10578, 2),
+    (0x103dc, 4),
+    (0x103e0, 4),
+];
+/// `next_branch`'s `bne` whose label is the next instruction, and `main`'s
+/// `beq` to its `bl abort`.
+const BRANCHES: [(u64, u64); 2] = [(0x10588, 0x1058c), (0x103f4, 0x10404)];
+/// `_start`'s pool word, decoded as a predicated `andeq`, whose skip runs into
+/// the entry of `_start_c`.
+const SKIP_INTO_ENTRY: (u64, u64) = (0x10430, 0x10434);
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap()
@@ -74,4 +97,36 @@ fn calls_to_plt_stubs_and_pc_relative_strings_keep_their_rows() {
     for (add, string) in STRINGS {
         assert!(from(idx, add).contains(&(string, XrefKind::Data)), "{add:#x}: {:?}", from(idx, add));
     }
+}
+
+/// A predicated instruction that is not a branch files no jump to the next
+/// instruction, in A32 and in a Thumb `it` block.
+#[test]
+fn a_predicated_instruction_files_no_jump_to_the_next_one() {
+    let idx = index();
+    for (at, len) in PREDICATED {
+        assert!(from(idx, at).is_empty(), "{at:#x}: {:?}", from(idx, at));
+        assert!(idx.refs_to(at + len).is_empty(), "{:#x}: {:?}", at + len, idx.refs_to(at + len));
+    }
+}
+
+/// A conditional branch keeps its jump, also when its label is the next
+/// instruction, and the code after a predicated instruction is still walked.
+#[test]
+fn conditional_branches_keep_their_jump() {
+    let idx = index();
+    for (at, label) in BRANCHES {
+        assert_eq!(from(idx, at), vec![(label, XrefKind::Jump)], "{at:#x}");
+    }
+    assert_eq!(idx.function_containing(0x10568), Some(0x10560));
+    assert_eq!(idx.function_containing(0x1057a), Some(0x10570));
+}
+
+/// A skip that runs into another function's entry is a way into that function,
+/// which the call graph counts, so it keeps its jump.
+#[test]
+fn a_skip_into_another_entry_keeps_its_jump() {
+    let (at, entry) = SKIP_INTO_ENTRY;
+    assert!(index().is_function_entry(entry));
+    assert_eq!(from(index(), at), vec![(entry, XrefKind::Jump)]);
 }
