@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 
 use kuna_analysis::listing::xrefs::{self, XrefIndex, XrefKind};
 use kuna_console::engine::bootstrap_from_object;
+use kuna_decomp::architecture::Architecture;
 
 /// The PLT stubs (entry, slot) of `printf`, `puts` and `strlen`.
 const STUBS: [(u64, u64); 3] = [(0x10310, 0x2300c), (0x1031c, 0x23010), (0x1034c, 0x23020)];
@@ -54,10 +55,16 @@ fn fixture(name: &str) -> PathBuf {
 
 /// The reference index of fixture `name` under the default options.
 fn build(name: &str) -> XrefIndex {
+    build_with(name, |_| {})
+}
+
+/// The reference index of fixture `name` after `configure` sets its options.
+fn build_with(name: &str, configure: fn(&mut Architecture)) -> XrefIndex {
     let bin = fixture(name);
     let spec_roots = vec![repo_root().join("specs").to_str().unwrap().to_string()];
     let mut prog = bootstrap_from_object(bin.to_str().unwrap(), "", &spec_roots)
         .expect("bootstrap fixture with built processor specs");
+    configure(prog.arch_mut());
     prog.commit_pending_analysis().expect("analysis commit succeeds");
     let bytes = std::fs::read(&bin).expect("fixture readable");
     let file = object::File::parse(&*bytes).expect("fixture parses");
@@ -142,4 +149,21 @@ fn a_condition_skip_off_arm_keeps_its_jump() {
     for (at, next) in [(0x401042, 0x401045), (0x401063, 0x401067)] {
         assert_eq!(from(&idx, at), vec![(next, XrefKind::Jump)], "{at:#x}");
     }
+}
+
+/// On the stripped `xreffp_strip_arm_le32`, `found_by_call` is found only from
+/// `_start`'s `bl`, after the walk has queued it: the `moveq` skip that runs
+/// into it from `falls_in` still keeps its jump, under both `armframes`
+/// settings.
+#[test]
+fn a_skip_into_an_entry_found_from_a_call_keeps_its_jump() {
+    let (at, entry) = (0x10074, 0x10078);
+    for idx in [build("xreffp_strip_arm_le32"), build_with("xreffp_strip_arm_le32", armframes_off)] {
+        assert!(idx.is_function_entry(entry));
+        assert_eq!(from(&idx, at), vec![(entry, XrefKind::Jump)]);
+    }
+}
+
+fn armframes_off(arch: &mut Architecture) {
+    arch.set_kuna_option("armframes", "off").expect("armframes flips off");
 }

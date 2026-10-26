@@ -1108,7 +1108,6 @@ fn descend(
             let c = classify(&raw, vma, len);
             let skip = a32_tables.as_ref().and_then(|_| c.predicated_skip(vma, len));
             let condition = arm.then(|| c.condition_skip(&raw, vma, len)).flatten();
-            let leaves = |target: u64| target != entry && seed_set.contains(&target);
             if let Some(fall) = c.fall_through.filter(|_| !waiting.is_empty()) {
                 woken.extend(waiting.remove(&fall).into_iter().flatten());
             }
@@ -1146,7 +1145,7 @@ fn descend(
             });
             // Every row this instruction produces carries the same render, and an
             // instruction that produces none needs no render at all.
-            let mut text = if c.flows.iter().all(|&t| Some(t) == condition && !leaves(t)) && drefs.is_empty() && pointer.is_none() {
+            let mut text = if c.flows.iter().all(|&t| Some(t) == condition) && drefs.is_empty() && pointer.is_none() {
                 String::new()
             } else {
                 assembly(translate, vma, &code_space)
@@ -1161,7 +1160,11 @@ fn descend(
 
             for &target in &c.flows {
                 let kind = if c.flow.is_call { XrefKind::Call } else { XrefKind::Jump };
-                if Some(target) != skip && (Some(target) != condition || leaves(target)) {
+                if Some(target) == condition {
+                    if Some(target) != skip {
+                        st.skips.push((vma, target, entry));
+                    }
+                } else if Some(target) != skip {
                     st.file(vma, target, kind, &text);
                 }
                 if c.flow.is_call {
@@ -1318,6 +1321,16 @@ fn descend(
     for f in focused {
         if !st.decoded.contains(&f) {
             st.funcs.remove(&f);
+        }
+    }
+
+    // A condition skip that runs into another function's entry is a way into
+    // that function, which the call graph counts. Decided over the final entry
+    // set, so the walk order cannot change which rows survive.
+    for (from, to, entry) in std::mem::take(&mut st.skips) {
+        if to != entry && st.funcs.contains(&to) {
+            let text = assembly(translate, from, &code_space);
+            st.file(from, to, XrefKind::Jump, &text);
         }
     }
 
@@ -1579,6 +1592,9 @@ struct State {
     /// The frame's own edges into one are in no other body's record, so a body
     /// that decodes it later cannot trust what it carries there.
     refused: HashSet<u64>,
+    /// Condition skips `(from, to, entry)` held until the walk ends: one files
+    /// a `Jump` only when `to` is then another function's entry.
+    skips: Vec<(u64, u64, u64)>,
 }
 
 impl State {
@@ -1595,6 +1611,7 @@ impl State {
             }),
             switches: Vec::new(),
             refused: HashSet::new(),
+            skips: Vec::new(),
         }
     }
 
@@ -2339,6 +2356,7 @@ mod tests {
             flow: None,
             switches: Vec::new(),
             refused: HashSet::new(),
+            skips: Vec::new(),
         };
         for e in edges {
             st.file(e.from, e.to, e.kind, "");
@@ -2397,6 +2415,7 @@ mod tests {
             flow: None,
             switches: Vec::new(),
             refused: HashSet::new(),
+            skips: Vec::new(),
         };
         st.file(0x1188, 0x4008, XrefKind::Read, "");
         let index = st.finish(BTreeMap::new(), false);
@@ -2433,6 +2452,7 @@ mod tests {
             }),
             switches: Vec::new(),
             refused: HashSet::new(),
+            skips: Vec::new(),
         };
         let index = st.finish(BTreeMap::new(), true);
         assert_eq!(index.function_containing(0x1001), Some(0x1000));
