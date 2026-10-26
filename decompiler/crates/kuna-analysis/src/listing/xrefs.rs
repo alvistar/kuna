@@ -1176,7 +1176,10 @@ fn descend(
                 // the next instruction (`it eq; beq.w`) repeats the target.
                 if Some(target) == condition.take_if(|&mut skip| skip == target) {
                     if c.fall_through.is_none() {
-                        st.skips.push((vma, target, entry));
+                        if text.is_empty() {
+                            text = assembly(translate, vma, &code_space);
+                        }
+                        st.skips.push((vma, target, entry, text.clone()));
                     }
                 } else {
                     st.file(vma, target, kind, &text);
@@ -1344,9 +1347,8 @@ fn descend(
     // A condition skip that runs into another function's entry is a way into
     // that function, which the call graph counts. Decided over the final entry
     // set, so the walk order cannot change which rows survive.
-    for (from, to, entry) in std::mem::take(&mut st.skips) {
+    for (from, to, entry, text) in std::mem::take(&mut st.skips) {
         if to != entry && st.funcs.contains(&to) {
-            let text = assembly(translate, from, &code_space);
             st.file(from, to, XrefKind::Jump, &text);
         }
     }
@@ -1609,9 +1611,10 @@ struct State {
     /// The frame's own edges into one are in no other body's record, so a body
     /// that decodes it later cannot trust what it carries there.
     refused: HashSet<u64>,
-    /// Condition skips `(from, to, entry)` held until the walk ends: one files
-    /// a `Jump` only when `to` is then another function's entry.
-    skips: Vec<(u64, u64, u64)>,
+    /// Condition skips `(from, to, entry, text)` held until the walk ends: one
+    /// files a `Jump` only when `to` is then another function's entry. `text`
+    /// is rendered when the walk decodes `from`, in the mode it chose.
+    skips: Vec<(u64, u64, u64, String)>,
 }
 
 impl State {

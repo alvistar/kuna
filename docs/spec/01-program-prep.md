@@ -6222,8 +6222,9 @@ the skip is the one way into the other function, which the call graph counts
 among its callers and tail jumps (`callbacktype`, `calleevote`), so it keeps its
 `Jump`. A predicated instruction that falls through (`ldrne`, `moveq`, `strne`,
 a pool word decoded as `andeq`) reaches the same entry by its fall-through,
-which files no row either, so its skip files nothing. The walk holds each kept
-skip until it ends and decides against
+which files no row either, so its skip files nothing. The walk renders a kept
+skip's instruction when it decodes it, in the mode it chose, holds the skip
+until it ends and decides against
 the final entry set (seeds, prologue roots, entries found from calls, focus and
 gap-walk entries), so the order in which it finds an entry cannot change the
 answer. A conditional branch whose label is the next instruction (`bne` to the

@@ -1,5 +1,5 @@
 /* Fixture source for `xreffp_strip_arm_le32`: a stripped static ARM ELF
-   (A32 and one Thumb-2 function) mapped at 0x10000, whose only symbol-free
+   (A32 and three Thumb-2 functions) mapped at 0x10000, whose only symbol-free
    seed is `_start`. Every other function is found from a call.
 
    `falls_in` ends in a predicated `moveq` whose condition skip runs into
@@ -7,7 +7,9 @@
    into `after_dispatch`, the next function's entry. `it_branch` holds a real
    conditional branch to the next instruction inside an `it eq` block
    (`beq.w`), which lifts to the condition skip and the branch, both to the
-   next instruction.
+   next instruction. `it_return` (Thumb) ends in `it ne; bxne lr`, which has
+   no fall-through, so its condition skip is the one way into `thumb_next`,
+   found only from a call.
 
    Built with GCC 14.2 for armhf musl (homebrew `musl-cross` 0.9.11); the
    SHA-256 below is that toolchain's output:
@@ -16,7 +18,7 @@
            -Wl,--build-id=none -s \
            -o xreffp_strip_arm_le32 xreffp_strip_arm_le32.S
 
-   SHA-256 95c02f85431a4167cdb9ae4060e2dd9ef559f7024fe386b517415ff9e32d22ad. */
+   SHA-256 ca57e3366b1d95b19b80690d4c2b1a73e1d5da0afe895955fe1a26f4ca2e727a. */
 
     .syntax unified
     .text
@@ -57,4 +59,16 @@ it_branch:
     it      eq
     beq.w   3f
 3:  adds    r0, #1
+    push    {r4, lr}
+    bl      it_return
+    bl      thumb_next
+    pop     {r4, pc}
+
+    .thumb_func
+it_return:
+    cmp     r0, #0
+    it      ne
+    bxne    lr
+thumb_next:
+    adds    r0, #2
     bx      lr

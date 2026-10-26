@@ -193,3 +193,22 @@ fn a_predicated_branch_to_the_next_instruction_keeps_its_jump() {
     let rows: Vec<_> = idx.refs_from_instruction(0x100a8).iter().map(|r| (r.to, r.kind, r.instruction.clone())).collect();
     assert_eq!(rows, vec![(0x100ac, XrefKind::Jump, "b.eq.w 0x100ac".to_string())]);
 }
+
+/// A kept skip carries the text of the instruction as the walk decoded it:
+/// `it_return`'s Thumb `it ne; bxne lr` has no fall-through, so its skip is the
+/// one way into `thumb_next`. With `armframes on` the walk carries the Thumb
+/// mode itself and the context database keeps A32 there, so a render after the
+/// walk would read the bytes as A32.
+#[test]
+fn a_kept_thumb_skip_is_rendered_as_the_walk_decoded_it() {
+    let (at, entry) = (0x100be, 0x100c0);
+    for idx in [build("xreffp_strip_arm_le32"), build_with("xreffp_strip_arm_le32", armframes_on)] {
+        assert!(idx.is_function_entry(entry));
+        let rows: Vec<_> = idx.refs_from_instruction(at).iter().map(|r| (r.to, r.kind, r.instruction.clone())).collect();
+        assert_eq!(rows, vec![(entry, XrefKind::Jump, "bx.ne lr".to_string())]);
+    }
+}
+
+fn armframes_on(arch: &mut Architecture) {
+    arch.set_kuna_option("armframes", "on").expect("armframes flips on");
+}
