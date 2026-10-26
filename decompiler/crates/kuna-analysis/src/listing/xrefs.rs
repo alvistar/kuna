@@ -770,8 +770,8 @@ fn descend(
 
     // Reused across every decode in the walk (see [`FullCapture`]).
     let mut cap = FullCapture::default();
-    let mut plt_stubs = PltStubs::new(data_space.as_ref());
     let arm = file.architecture() == object::Architecture::Arm;
+    let mut plt_stubs = arm.then(|| PltStubs::new(data_space.as_ref()));
     let mut raw: Vec<RawOp> = Vec::new();
 
     // Share the decoded partition with prologue recovery and AIF.
@@ -1157,11 +1157,13 @@ fn descend(
             }
             // (kuna) `pltstub`: a PLT stub's partial sums are not references,
             // its slot is. See [`super::kuna_pltstub`].
-            for (from, to, text) in plt_stubs.step(vma, len, cap.ops(), &mut drefs, &text) {
-                st.file(from, to, XrefKind::Data, &text);
-            }
-            if text.is_empty() && !drefs.is_empty() {
-                text = assembly(translate, vma, &code_space);
+            if let Some(stubs) = plt_stubs.as_mut() {
+                for (from, to, text) in stubs.step(vma, len, cap.ops(), &mut drefs, &text) {
+                    st.file(from, to, XrefKind::Data, &text);
+                }
+                if text.is_empty() && !drefs.is_empty() {
+                    text = assembly(translate, vma, &code_space);
+                }
             }
 
             if cap.ops().iter().any(|op| op.opcode == OpCode::CPUI_CALLIND) {
@@ -1287,7 +1289,7 @@ fn descend(
             }
         }
 
-        for (from, to, text) in plt_stubs.drain() {
+        for (from, to, text) in plt_stubs.iter_mut().flat_map(PltStubs::drain) {
             st.file(from, to, XrefKind::Data, &text);
         }
         let verdict = picpool.finish(&st.refused);
