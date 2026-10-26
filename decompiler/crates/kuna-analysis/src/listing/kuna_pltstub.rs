@@ -250,7 +250,8 @@ impl<'a> Values<'a> {
     /// The slot whose word an instruction loads from a known address and then
     /// jumps to (`BRANCHIND`), or `None`. A value computed from a loaded word
     /// (`ldr pc` clears the Thumb bit first) stands for that word's slot, so
-    /// `ldm ip,{r0,pc}` names `pc`'s word, not `r0`'s.
+    /// `ldm ip,{r0,pc}` names `pc`'s word, not `r0`'s. Every op's output loses
+    /// the value it held before, so a reloaded register names no address.
     fn load_jump(&mut self, ops: &[FullOp]) -> Option<u64> {
         if ops.last()?.opcode != OpCode::CPUI_BRANCHIND {
             return None;
@@ -263,16 +264,18 @@ impl<'a> Values<'a> {
                 OpCode::CPUI_LOAD => op.ins.get(1).and_then(|at| self.value(at)),
                 _ => op.ins.iter().find_map(from),
             };
-            let out = op.out.as_ref().and_then(Self::key);
-            match (slot, out) {
-                (Some(slot), Some(out)) => {
+            let Some(out) = op.out.as_ref().and_then(Self::key) else { continue };
+            match slot {
+                Some(slot) => {
                     loaded.insert(out, slot);
+                    self.known.remove(&out);
                 }
-                (None, Some(out)) => {
+                None => {
                     loaded.remove(&out);
-                    let _ = self.eval(op);
+                    if self.eval(op).is_none() {
+                        self.known.remove(&out);
+                    }
                 }
-                _ => {}
             }
         }
         None
@@ -416,6 +419,25 @@ mod tests {
         step(&mut stubs, 0x1000, &adr(&s, 0x1008), &[(0x1008, XrefKind::Data)]);
         step(&mut stubs, 0x1004, &add(&s, 0x100000), &[(0x100000, XrefKind::Data)]);
         assert_eq!(step(&mut stubs, 0x1008, &ldm, &[]), (vec![(0x10100c, XrefKind::Read)], vec![]));
+    }
+
+    /// A load-and-jump that reloads the chain register and then jumps through
+    /// the word the reload names (`ldr ip,[ip]; ldr pc,[ip]`) reads an address
+    /// the chain does not know: it files no slot and keeps the held rows.
+    #[test]
+    fn a_reloaded_register_names_no_slot() {
+        let s = spaces();
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
+        let reload = vec![
+            op(OpCode::CPUI_LOAD, Some(vn(&s.reg, IP, 4)), vec![vn(&s.konst, 3, 8), vn(&s.reg, IP, 4)]),
+            op(OpCode::CPUI_LOAD, Some(vn(&s.reg, PC, 4)), vec![vn(&s.konst, 3, 8), vn(&s.reg, IP, 4)]),
+            op(OpCode::CPUI_BRANCHIND, None, vec![vn(&s.reg, PC, 4)]),
+        ];
+        step(&mut stubs, 0x1000, &adr(&s, 0x1008), &[(0x1008, XrefKind::Data)]);
+        step(&mut stubs, 0x1004, &add(&s, 0x100000), &[(0x100000, XrefKind::Data)]);
+        let (rows, released) = step(&mut stubs, 0x1008, &reload, &[]);
+        assert_eq!(rows, vec![]);
+        assert_eq!(released, vec![(0x1000, 0x1008, "text".to_string()), (0x1004, 0x100000, "text".to_string())]);
     }
 
     /// A chain whose slot is in no mapped section is not a stub: it files no
