@@ -1161,10 +1161,8 @@ fn descend(
             for &target in &c.flows {
                 let kind = if c.flow.is_call { XrefKind::Call } else { XrefKind::Jump };
                 if Some(target) == condition {
-                    if Some(target) != skip {
-                        st.skips.push((vma, target, entry));
-                    }
-                } else if Some(target) != skip {
+                    st.skips.push((vma, target, entry));
+                } else {
                     st.file(vma, target, kind, &text);
                 }
                 if c.flow.is_call {

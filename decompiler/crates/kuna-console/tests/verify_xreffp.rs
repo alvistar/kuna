@@ -167,3 +167,17 @@ fn a_skip_into_an_entry_found_from_a_call_keeps_its_jump() {
 fn armframes_off(arch: &mut Architecture) {
     arch.set_kuna_option("armframes", "off").expect("armframes flips off");
 }
+
+/// An A32 table dispatch's skip is a condition skip like any other: when it
+/// runs into the next function's entry (`dispatch_last`'s `addls pc` into
+/// `after_dispatch`) it keeps its jump, whether `armframes` reads the table or
+/// not.
+#[test]
+fn a_dispatch_skip_into_an_entry_keeps_its_jump() {
+    let (at, entry) = (0x10084, 0x10088);
+    for idx in [build("xreffp_strip_arm_le32"), build_with("xreffp_strip_arm_le32", armframes_off)] {
+        assert!(idx.is_function_entry(entry));
+        let jumps: Vec<_> = from(&idx, at).into_iter().filter(|&(_, kind)| kind == XrefKind::Jump).collect();
+        assert!(jumps.contains(&(entry, XrefKind::Jump)), "{jumps:?}");
+    }
+}
