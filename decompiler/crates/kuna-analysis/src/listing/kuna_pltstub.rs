@@ -26,8 +26,9 @@
 //! of constants, so no other instruction shape matches, and a run that leaves
 //! the shape at any step keeps the rows the generic rule gives it.
 //!
-//! Chains run only inside the image's `.plt` and `.plt.sec` sections, where the
-//! linker puts its stubs; an image without section headers follows none, since
+//! Chains run only inside the image's linker stub sections (`.plt`, `.iplt` for
+//! the IFUNC stubs of a static image, and the other names of
+//! [`STUB_SECTIONS`]), where the linker puts its stubs; an image without section headers follows none, since
 //! nothing says where its stubs are. Code elsewhere built the same way (a
 //! hand-written `adr; add; ldr pc` veneer) keeps its rows.
 //!
@@ -46,6 +47,7 @@ use kuna_num::opcodes::OpCode;
 use kuna_num::pcoderaw::VarnodeData;
 
 use super::xrefs::{in_range, FullOp, XrefKind};
+use crate::analyzers::entry::kuna_fdeinterior::STUB_SECTIONS;
 
 /// The most constant adds a chain may take before its load: one in the
 /// standard entry, two with `--long-plt`.
@@ -70,7 +72,7 @@ pub(super) struct PltStubs<'a> {
     data_space: Option<&'a Rc<AddrSpace>>,
     /// The mapped ranges a slot must lie in.
     mapped: &'a [(u64, u64)],
-    /// The `.plt` and `.plt.sec` ranges, sorted: the only place a chain runs.
+    /// The stub section ranges, sorted: the only place a chain runs.
     plt: Vec<(u64, u64)>,
     open: HashMap<u64, Chain>,
 }
@@ -81,9 +83,9 @@ impl<'a> PltStubs<'a> {
         PltStubs { data_space, mapped, plt, open: HashMap::new() }
     }
 
-    /// The matcher for `file`, or `None` when it has no `.plt`/`.plt.sec`
-    /// section: without section headers the stubs' extent is unknown, so no
-    /// chain is followed and every row stays as the constant scan files it.
+    /// The matcher for `file`, or `None` when it has no stub section: without
+    /// section headers the stubs' extent is unknown, so no chain is followed
+    /// and every row stays as the constant scan files it.
     pub(super) fn for_file(
         file: &object::File,
         data_space: Option<&'a Rc<AddrSpace>>,
@@ -91,7 +93,7 @@ impl<'a> PltStubs<'a> {
     ) -> Option<Self> {
         let plt: Vec<(u64, u64)> = file
             .sections()
-            .filter(|s| matches!(s.name(), Ok(".plt" | ".plt.sec")) && s.size() > 0)
+            .filter(|s| s.name().is_ok_and(|name| STUB_SECTIONS.contains(&name)) && s.size() > 0)
             .map(|s| (s.address(), s.address() + s.size()))
             .collect();
         (!plt.is_empty()).then(|| Self::new(data_space, mapped, plt))

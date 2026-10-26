@@ -6179,8 +6179,9 @@ stub uses. The walk now follows the chain in its own order
 (`decompiler/crates/kuna-analysis/src/listing/kuna_pltstub.rs`): each step is the
 instruction the walk decoded, in the mode it chose, and an open chain waits for
 the walk to decode its fall-through; it never decodes ahead. It runs on ARM images
-only, and only on instructions inside the `.plt` and `.plt.sec` sections, where
-the linker puts its stubs: a hand-written `adr; add; ldr pc` veneer elsewhere
+only, and only on instructions inside the linker's stub sections (the list
+`fdeinterior` uses; on ARM, `.plt` and the `.iplt` that holds a static image's
+IFUNC stubs in the same template), where the linker puts its stubs: a hand-written `adr; add; ldr pc` veneer elsewhere
 keeps its rows, and an image without section headers follows no chain, since
 nothing there says where the stubs are. Any such instruction that sets one
 register to a constant starts a chain,

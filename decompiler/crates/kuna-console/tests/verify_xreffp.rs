@@ -96,6 +96,17 @@ fn a_plt_stub_files_its_slot_and_no_partial_address() {
     assert!(idx.refs_to(STUB_ADD).is_empty(), "{:?}", idx.refs_to(STUB_ADD));
 }
 
+/// A static image's IFUNC stub lies in `.iplt`, in the `.plt` template: it
+/// files its `.got` slot and not the PC value its `adr` names.
+#[test]
+fn an_iplt_stub_files_its_slot_and_no_partial_address() {
+    let (stub, slot) = (0x1007c, 0x110a4);
+    let idx = build("xrefiplt_arm_le32");
+    assert!(from(&idx, 0x10088).contains(&(stub, XrefKind::Call)), "{:?}", from(&idx, 0x10088));
+    let rows: Vec<_> = (0..3).flat_map(|i| from(&idx, stub + 4 * i)).collect();
+    assert_eq!(rows, vec![(slot, XrefKind::Read)]);
+}
+
 /// The calls into the stubs and the PC-relative strings of the caller keep
 /// their rows.
 #[test]
