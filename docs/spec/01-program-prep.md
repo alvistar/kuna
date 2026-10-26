@@ -6210,11 +6210,11 @@ it keeps its `Jump`. A conditional branch whose label is the next instruction (`
 next line) is a `CBRANCH` and nothing after it, so it keeps its `Jump`, as in
 Ghidra, where its target is an operand, not `inst_next`. A predicated
 instruction with no ops of its own after the skip would keep its row too. The
-rule is not ARM's alone. The same `goto inst_next` comes ahead of the ops of
-x86 `cmovcc` and `rep` string instructions, AArch64 `ccmp`, `ccmn`, `fcmp` and
-`fcsel`, PowerPC conditional returns (`beqlr`), MIPS `bc1t` (whose taken target
-keeps its row) and the SPARC `call` (whose callee keeps its row), and each of
-them loses the row to its own fall-through.
+rule applies to ARM images only (A32 and Thumb). The same `goto inst_next` comes
+ahead of the ops of x86 `cmovcc` and `rep` string instructions, AArch64 `ccmp`,
+`ccmn`, `fcmp` and `fcsel`, PowerPC conditional returns (`beqlr`), MIPS `bc1t`
+and the SPARC `call`, and on those architectures each still files a `Jump` to its
+own fall-through.
 
 (kuna) Every rule above widens what the walk reads out of an instruction it
 reached; the complementary defect is the instructions it never reaches at all.
@@ -6475,8 +6475,8 @@ exactly as before. Where A32 tables are read, both walks only recognise the
 skip (`Classified::predicated_skip` in
 `decompiler/crates/kuna-analysis/src/listing/classify.rs`): a computed jump
 whose only flow is its skip is read as a table. Under `armframes off`, and on
-every other architecture, no A32 table is read. The skip files no `Jump` row
-under every option (the condition-skip rule below). The switch record states the guard's case count, so a table longer than
+every other architecture, no A32 table is read. On ARM the skip files no `Jump`
+row under every option (the condition-skip rule above). The switch record states the guard's case count, so a table longer than
 `jumptablemax` is marked truncated. A dispatch whose table gives no case (a run
 shorter than two entries, or `b caseN` slots past the section end) states no
 count, and the other table readers run on it as on any computed jump. A dispatch the walk reaches before the

@@ -658,8 +658,8 @@ pub fn build_with_focus(
 /// PC-relative operand names the dispatch itself rather than a table
 /// ([`super::classify::Classified::predicated_skip`]).
 ///
-/// The skip any predicated instruction lifts to stays one of its `flows` and
-/// is walked, but files no row
+/// On an ARM image the skip any predicated instruction lifts to stays one of
+/// its `flows` and is walked, but files no row
 /// ([`super::classify::Classified::condition_skip`]).
 fn descend(
     file: &object::File,
@@ -771,6 +771,7 @@ fn descend(
     // Reused across every decode in the walk (see [`FullCapture`]).
     let mut cap = FullCapture::default();
     let mut plt_stubs = PltStubs::default();
+    let arm = file.architecture() == object::Architecture::Arm;
     let mut raw: Vec<RawOp> = Vec::new();
 
     // Share the decoded partition with prologue recovery and AIF.
@@ -1106,7 +1107,7 @@ fn descend(
             );
             let c = classify(&raw, vma, len);
             let skip = a32_tables.as_ref().and_then(|_| c.predicated_skip(vma, len));
-            let condition = c.condition_skip(vma, len);
+            let condition = arm.then(|| c.condition_skip(vma, len)).flatten();
             let leaves = |target: u64| target != entry && seed_set.contains(&target);
             if let Some(fall) = c.fall_through.filter(|_| !waiting.is_empty()) {
                 woken.extend(waiting.remove(&fall).into_iter().flatten());

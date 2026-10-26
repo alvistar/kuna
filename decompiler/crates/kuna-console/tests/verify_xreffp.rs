@@ -48,25 +48,28 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap()
 }
 
-fn fixture() -> PathBuf {
-    repo_root().join("decompiler/crates/kuna-analysis/tests/fixtures/xreffp_arm_le32")
+fn fixture(name: &str) -> PathBuf {
+    repo_root().join("decompiler/crates/kuna-analysis/tests/fixtures").join(name)
 }
 
-/// The fixture's reference index under the default options, built once.
+/// The reference index of fixture `name` under the default options.
+fn build(name: &str) -> XrefIndex {
+    let bin = fixture(name);
+    let spec_roots = vec![repo_root().join("specs").to_str().unwrap().to_string()];
+    let mut prog = bootstrap_from_object(bin.to_str().unwrap(), "", &spec_roots)
+        .expect("bootstrap fixture with built processor specs");
+    prog.commit_pending_analysis().expect("analysis commit succeeds");
+    let bytes = std::fs::read(&bin).expect("fixture readable");
+    let file = object::File::parse(&*bytes).expect("fixture parses");
+    let seeds: Vec<u64> =
+        prog.function_entries_canonical().iter().map(|e| e.addr.get_offset()).collect();
+    xrefs::build(&file, prog.arch(), prog.arch().translate(), &seeds)
+}
+
+/// `xreffp_arm_le32`'s reference index, built once.
 fn index() -> &'static XrefIndex {
     static INDEX: OnceLock<XrefIndex> = OnceLock::new();
-    INDEX.get_or_init(|| {
-        let bin = fixture();
-        let spec_roots = vec![repo_root().join("specs").to_str().unwrap().to_string()];
-        let mut prog = bootstrap_from_object(bin.to_str().unwrap(), "", &spec_roots)
-            .expect("bootstrap fixture with built processor specs");
-        prog.commit_pending_analysis().expect("analysis commit succeeds");
-        let bytes = std::fs::read(&bin).expect("fixture readable");
-        let file = object::File::parse(&*bytes).expect("fixture parses");
-        let seeds: Vec<u64> =
-            prog.function_entries_canonical().iter().map(|e| e.addr.get_offset()).collect();
-        xrefs::build(&file, prog.arch(), prog.arch().translate(), &seeds)
-    })
+    INDEX.get_or_init(|| build("xreffp_arm_le32"))
 }
 
 fn from(idx: &XrefIndex, at: u64) -> Vec<(u64, XrefKind)> {
@@ -129,4 +132,14 @@ fn a_skip_into_another_entry_keeps_its_jump() {
     let (at, entry) = SKIP_INTO_ENTRY;
     assert!(index().is_function_entry(entry));
     assert_eq!(from(index(), at), vec![(entry, XrefKind::Jump)]);
+}
+
+/// The condition skip is an ARM rule: off ARM, an instruction whose own skip
+/// SLEIGH spells `goto inst_next` (x86-64 `cmove`) keeps its jump as before.
+#[test]
+fn a_condition_skip_off_arm_keeps_its_jump() {
+    let idx = build("covertrim_x86_64");
+    for (at, next) in [(0x401042, 0x401045), (0x401063, 0x401067)] {
+        assert_eq!(from(&idx, at), vec![(next, XrefKind::Jump)], "{at:#x}");
+    }
 }
