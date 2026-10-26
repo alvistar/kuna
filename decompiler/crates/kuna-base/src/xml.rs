@@ -2105,7 +2105,9 @@ mod tests {
         // and kuna-sparc-register-pair / an ldd-loaded SPARC register pair whose
         // registers then hold two 32-bit values keeps them apart (option off = one
         // 64-bit local updated with CONCAT44)
-        assert_eq!(count, 583, "corpus file count drifted");
+        // and kuna-armpltslot, -armcondskip / the ARM xref options parse and are
+        // inert on the console path
+        assert_eq!(count, 585, "corpus file count drifted");
     }
 
     /// ~20 representative SLEIGH spec files across varied processors
