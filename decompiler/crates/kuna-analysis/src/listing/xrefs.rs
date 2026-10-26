@@ -658,9 +658,20 @@ pub fn build_with_focus(
 /// PC-relative operand names the dispatch itself rather than a table
 /// ([`super::classify::Classified::predicated_skip`]).
 ///
-/// On an ARM image the skip any predicated instruction lifts to stays one of
-/// its `flows` and is walked, but files no row
-/// ([`super::classify::Classified::condition_skip`]).
+/// (kuna) On an ARM image the skip any predicated instruction lifts to stays
+/// one of its `flows` and is walked, but files no row
+/// ([`super::classify::Classified::condition_skip`]). The skip leads `flows`,
+/// so only the first flow equal to it is the skip: a predicated branch whose
+/// label is the next instruction (`it eq; beq.w`) repeats the target and keeps
+/// its row. A skip from an instruction with no fall-through (`bxne lr`,
+/// `ldrne pc`, `addls pc`) that runs into another function's entry is the one
+/// way into that function, which the call graph counts, so it keeps its
+/// `Jump`; it is held, with its text rendered at decode, and decided over the
+/// final entry set after the walk, so the walk order cannot change which rows
+/// survive.
+///
+/// (kuna) On an ARM image a PLT stub's partial sums are not references, its
+/// slot is ([`super::kuna_pltstub`]).
 fn descend(
     file: &object::File,
     arch: &Architecture,
@@ -1155,8 +1166,6 @@ fn descend(
             if let Some(word) = pointer {
                 held.push((vma, word, text.clone()));
             }
-            // (kuna) `pltstub`: a PLT stub's partial sums are not references,
-            // its slot is. See [`super::kuna_pltstub`].
             if let Some(stubs) = plt_stubs.as_mut() {
                 for (from, to, text) in stubs.step(vma, len, cap.ops(), &mut drefs, &text) {
                     st.file(from, to, XrefKind::Data, &text);
@@ -1172,8 +1181,6 @@ fn descend(
 
             for &target in &c.flows {
                 let kind = if c.flow.is_call { XrefKind::Call } else { XrefKind::Jump };
-                // The skip leads `flows`; a predicated branch whose label is
-                // the next instruction (`it eq; beq.w`) repeats the target.
                 if Some(target) == condition.take_if(|&mut skip| skip == target) {
                     if c.fall_through.is_none() {
                         if text.is_empty() {
@@ -1344,9 +1351,6 @@ fn descend(
         }
     }
 
-    // A condition skip that runs into another function's entry is a way into
-    // that function, which the call graph counts. Decided over the final entry
-    // set, so the walk order cannot change which rows survive.
     for (from, to, entry, text) in std::mem::take(&mut st.skips) {
         if to != entry && st.funcs.contains(&to) {
             st.file(from, to, XrefKind::Jump, &text);
