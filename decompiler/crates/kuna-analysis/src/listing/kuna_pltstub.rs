@@ -39,7 +39,7 @@ use kuna_base::space::{spacetype, AddrSpace};
 use kuna_num::opcodes::OpCode;
 use kuna_num::pcoderaw::VarnodeData;
 
-use super::xrefs::{FullOp, XrefKind};
+use super::xrefs::{in_range, FullOp, XrefKind};
 
 /// The most constant adds a chain may take before its load: one in the
 /// standard entry, two with `--long-plt`.
@@ -62,12 +62,14 @@ struct Chain {
 /// each expects next.
 pub(super) struct PltStubs<'a> {
     data_space: Option<&'a Rc<AddrSpace>>,
+    /// The mapped ranges a slot must lie in.
+    mapped: &'a [(u64, u64)],
     open: HashMap<u64, Chain>,
 }
 
 impl<'a> PltStubs<'a> {
-    pub(super) fn new(data_space: Option<&'a Rc<AddrSpace>>) -> Self {
-        PltStubs { data_space, open: HashMap::new() }
+    pub(super) fn new(data_space: Option<&'a Rc<AddrSpace>>, mapped: &'a [(u64, u64)]) -> Self {
+        PltStubs { data_space, mapped, open: HashMap::new() }
     }
 
     /// Take the instruction at `vma` (`len` bytes, lifted to `ops`, rendered
@@ -88,7 +90,7 @@ impl<'a> PltStubs<'a> {
         if let Some(mut chain) = self.open.remove(&vma) {
             let mut values = Values::holding(self.data_space, &chain);
             if chain.adds > 0 {
-                if let Some(slot) = values.load_jump(ops) {
+                if let Some(slot) = values.load_jump(ops).filter(|&slot| in_range(self.mapped, slot)) {
                     drefs.retain(|&(_, kind)| kind != XrefKind::Data);
                     if !drefs.contains(&(slot, XrefKind::Read)) {
                         drefs.push((slot, XrefKind::Read));
@@ -226,23 +228,35 @@ impl<'a> Values<'a> {
         if wrote { self.value(reg) } else { None }
     }
 
-    /// The slot an instruction loads from a known address and then jumps
-    /// through, or `None`.
+    /// The slot whose word an instruction loads from a known address and then
+    /// jumps to (`BRANCHIND`), or `None`. A value computed from a loaded word
+    /// (`ldr pc` clears the Thumb bit first) stands for that word's slot, so
+    /// `ldm ip,{r0,pc}` names `pc`'s word, not `r0`'s.
     fn load_jump(&mut self, ops: &[FullOp]) -> Option<u64> {
         if ops.last()?.opcode != OpCode::CPUI_BRANCHIND {
             return None;
         }
-        let mut slot = None;
+        let mut loaded: HashMap<(usize, u64, u32), u64> = HashMap::new();
         for op in ops {
-            match op.opcode {
-                OpCode::CPUI_LOAD => slot = slot.or(self.value(op.ins.get(1)?)),
-                OpCode::CPUI_BRANCHIND => {}
-                _ => {
+            let from = |vn: &VarnodeData| Self::key(vn).and_then(|key| loaded.get(&key).copied());
+            let slot = match op.opcode {
+                OpCode::CPUI_BRANCHIND => return from(op.ins.first()?),
+                OpCode::CPUI_LOAD => op.ins.get(1).and_then(|at| self.value(at)),
+                _ => op.ins.iter().find_map(from),
+            };
+            let out = op.out.as_ref().and_then(Self::key);
+            match (slot, out) {
+                (Some(slot), Some(out)) => {
+                    loaded.insert(out, slot);
+                }
+                (None, Some(out)) => {
+                    loaded.remove(&out);
                     let _ = self.eval(op);
                 }
+                _ => {}
             }
         }
-        slot
+        None
     }
 }
 
@@ -289,6 +303,7 @@ mod tests {
         FullOp { opcode, out, ins }
     }
 
+    const MAPPED: &[(u64, u64)] = &[(0x1000, 0x2000), (0x100000, 0x102000)];
     const IP: u64 = 0x50;
     const PC: u64 = 0x5c;
 
@@ -329,7 +344,7 @@ mod tests {
     #[test]
     fn a_chain_starts_whatever_its_first_value_maps_to() {
         let s = spaces();
-        let mut stubs = PltStubs::new(Some(&s.ram));
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
         assert_eq!(step(&mut stubs, 0x1000, &adr(&s, 0x1008), &[]), (vec![], vec![]));
         assert_eq!(step(&mut stubs, 0x1004, &add(&s, 0x100000), &[(0x100000, XrefKind::Data)]), (vec![], vec![]));
         assert_eq!(step(&mut stubs, 0x1008, &ldr_pc(&s, 0x10), &[]), (vec![(0x101018, XrefKind::Read)], vec![]));
@@ -340,12 +355,44 @@ mod tests {
     #[test]
     fn a_broken_chain_files_its_rows() {
         let s = spaces();
-        let mut stubs = PltStubs::new(Some(&s.ram));
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
         assert_eq!(step(&mut stubs, 0x1000, &adr(&s, 0x2000), &[(0x2000, XrefKind::Data)]), (vec![], vec![]));
         let store = vec![op(OpCode::CPUI_STORE, None, vec![vn(&s.konst, 3, 8), vn(&s.reg, IP, 4), vn(&s.reg, 0, 4)])];
         let (rows, released) = step(&mut stubs, 0x1004, &store, &[]);
         assert_eq!((rows, released), (vec![], vec![(0x1000, 0x2000, "text".to_string())]));
         step(&mut stubs, 0x2000, &adr(&s, 0x3000), &[(0x3000, XrefKind::Data)]);
         assert_eq!(stubs.drain(), vec![(0x2000, 0x3000, "text".to_string())]);
+    }
+
+    /// `ldm ip,{r0,pc}` loads two words and jumps to the second: the slot is
+    /// `pc`'s word, not the first word loaded.
+    #[test]
+    fn the_slot_is_the_word_the_jump_takes() {
+        let s = spaces();
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
+        let r0 = vn(&s.reg, 0x20, 4);
+        let at = vn(&s.uniq, 0x100, 4);
+        let ldm = vec![
+            op(OpCode::CPUI_LOAD, Some(r0), vec![vn(&s.konst, 3, 8), vn(&s.reg, IP, 4)]),
+            op(OpCode::CPUI_INT_ADD, Some(at.clone()), vec![vn(&s.reg, IP, 4), vn(&s.konst, 4, 4)]),
+            op(OpCode::CPUI_LOAD, Some(vn(&s.reg, PC, 4)), vec![vn(&s.konst, 3, 8), at]),
+            op(OpCode::CPUI_BRANCHIND, None, vec![vn(&s.reg, PC, 4)]),
+        ];
+        step(&mut stubs, 0x1000, &adr(&s, 0x1008), &[(0x1008, XrefKind::Data)]);
+        step(&mut stubs, 0x1004, &add(&s, 0x100000), &[(0x100000, XrefKind::Data)]);
+        assert_eq!(step(&mut stubs, 0x1008, &ldm, &[]), (vec![(0x10100c, XrefKind::Read)], vec![]));
+    }
+
+    /// A chain whose slot is in no mapped section is not a stub: it files no
+    /// `Read` and keeps the rows the generic rule gave it.
+    #[test]
+    fn an_unmapped_slot_is_no_stub() {
+        let s = spaces();
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
+        step(&mut stubs, 0x1000, &adr(&s, 0x1008), &[(0x1008, XrefKind::Data)]);
+        step(&mut stubs, 0x1004, &add(&s, 0x100000), &[(0x100000, XrefKind::Data)]);
+        let (rows, released) = step(&mut stubs, 0x1008, &ldr_pc(&s, 0x4000), &[]);
+        assert_eq!(rows, vec![]);
+        assert_eq!(released, vec![(0x1000, 0x1008, "text".to_string()), (0x1004, 0x100000, "text".to_string())]);
     }
 }

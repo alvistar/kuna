@@ -6184,7 +6184,9 @@ whether or not that first value lands in a mapped section (a stub far from its
 GOT can have its `pc + N<<20` in a gap between segments). A chain is one register set
 to a constant, one or two further instructions that only add constants to it,
 then a load through it plus a constant whose value is the target of a
-`BRANCHIND`. Only `COPY`, `INT_ADD` and `INT_SUB` of constants are evaluated, and
+`BRANCHIND` (a value computed from the loaded word, such as `ldr pc` clearing the
+Thumb bit, stands for it, so `ldm ip,{r0,pc}` names `pc`'s word), from a slot in
+a mapped section; a chain whose slot is unmapped is not a stub. Only `COPY`, `INT_ADD` and `INT_SUB` of constants are evaluated, and
 a middle step must neither touch memory nor branch. The constant rows of an open
 chain are held back; the chain's instructions file no constant `Data` row once it
 completes, and the load files the slot as a `Read`, which is what
