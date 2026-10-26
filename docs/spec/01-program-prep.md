@@ -6182,8 +6182,9 @@ the walk to decode its fall-through; it never decodes ahead. It runs on ARM imag
 only. Any instruction that sets one register to a constant starts a chain,
 whether or not that first value lands in a mapped section (a stub far from its
 GOT can have its `pc + N<<20` in a gap between segments). A chain is one register set
-to a constant, one or two further instructions that only add constants to it,
-then a load through it plus a constant whose value is the target of a
+to a constant, one or two further instructions that only add constants to it
+(each write of the register is an `INT_ADD` or `INT_SUB` computed from the
+register itself, so `mov ip,#K` or `movw ip,#K` breaks the chain), then a load through it plus a constant whose value is the target of a
 `BRANCHIND` (a value computed from the loaded word, such as `ldr pc` clearing the
 Thumb bit, stands for it, so `ldm ip,{r0,pc}` names `pc`'s word), from a slot in
 a mapped section; a chain whose slot is unmapped is not a stub. Only `COPY`, `INT_ADD` and `INT_SUB` of constants are evaluated, and

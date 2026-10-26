@@ -32,7 +32,7 @@
 //! still open are held back, and filed as they were when it breaks or when the
 //! body drains with it open.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use kuna_base::space::{spacetype, AddrSpace};
@@ -209,23 +209,42 @@ impl<'a> Values<'a> {
     }
 
     /// Evaluate an instruction that neither touches memory nor branches and
-    /// leaves `reg` holding a known value, which it returns: `add ip,ip,#N`
-    /// also computes flag temporaries, which are not followed.
+    /// adds a known value to `reg`, returning the sum: every write of `reg`
+    /// must be an `INT_ADD`/`INT_SUB` (or `COPY`) of a value computed from
+    /// `reg` itself, so `mov ip,#K` is no add. `add ip,ip,#N` also computes
+    /// flag temporaries, which are not followed.
     fn add_to(&mut self, ops: &[FullOp], reg: &VarnodeData) -> Option<u64> {
+        let reg_key = Self::key(reg)?;
+        let mut from_reg = HashSet::from([reg_key]);
         let mut wrote = false;
         for op in ops {
             if is_memory_or_flow(op.opcode) {
                 return None;
             }
             let evaluated = self.eval(op).is_some();
-            if op.out.as_ref() == Some(reg) {
-                if !evaluated {
+            let Some(out) = op.out.as_ref().and_then(Self::key) else { continue };
+            let derived = match (op.opcode, op.ins.as_slice()) {
+                (OpCode::CPUI_COPY | OpCode::CPUI_INT_SUB, [a, ..]) => Self::derived(&from_reg, a),
+                (OpCode::CPUI_INT_ADD, [a, b]) => Self::derived(&from_reg, a) || Self::derived(&from_reg, b),
+                _ => false,
+            };
+            if derived {
+                from_reg.insert(out);
+            } else {
+                from_reg.remove(&out);
+            }
+            if out == reg_key {
+                if !evaluated || !derived {
                     return None;
                 }
                 wrote = true;
             }
         }
         if wrote { self.value(reg) } else { None }
+    }
+
+    fn derived(from_reg: &HashSet<(usize, u64, u32)>, vn: &VarnodeData) -> bool {
+        Self::key(vn).is_some_and(|key| from_reg.contains(&key))
     }
 
     /// The slot whose word an instruction loads from a known address and then
@@ -363,6 +382,21 @@ mod tests {
         assert_eq!((rows, released), (vec![], vec![(0x1000, 0x2000, "text".to_string())]));
         step(&mut stubs, 0x2000, &adr(&s, 0x3000), &[(0x3000, XrefKind::Data)]);
         assert_eq!(stubs.drain(), vec![(0x2000, 0x3000, "text".to_string())]);
+    }
+
+    /// `mov ip,#K` overwrites the register instead of adding to it: the chain
+    /// breaks there, the `adr`'s row is filed as it was, and the load after
+    /// the `mov` files no slot.
+    #[test]
+    fn an_overwrite_is_not_an_add() {
+        let s = spaces();
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED);
+        step(&mut stubs, 0x1000, &adr(&s, 0x1800), &[(0x1800, XrefKind::Data)]);
+        let (_, released) = step(&mut stubs, 0x1004, &adr(&s, 0x101000), &[(0x101000, XrefKind::Data)]);
+        assert_eq!(released, vec![(0x1000, 0x1800, "text".to_string())]);
+        let (rows, released) = step(&mut stubs, 0x1008, &ldr_pc(&s, 0xc), &[]);
+        assert_eq!(rows, vec![]);
+        assert_eq!(released, vec![(0x1004, 0x101000, "text".to_string())]);
     }
 
     /// `ldm ip,{r0,pc}` loads two words and jumps to the second: the slot is
