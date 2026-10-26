@@ -6233,12 +6233,11 @@ the skip is the one way into the other function, which the call graph counts
 among its callers and tail jumps (`callbacktype`, `calleevote`), so it keeps its
 `Jump`. A predicated instruction that falls through (`ldrne`, `moveq`, `strne`,
 a pool word decoded as `andeq`) reaches the same entry by its fall-through,
-which files no row either, so its skip files nothing. The walk renders a kept
-skip's instruction when it decodes it, in the mode it chose, holds the skip
-until it ends and decides against
-the final entry set (seeds, prologue roots, entries found from calls, focus and
-gap-walk entries), so the order in which it finds an entry cannot change the
-answer. A conditional branch whose label is the next instruction (`bne` to the
+which files no row either, so its skip files nothing. The walk holds each such
+skip, with the mode it decoded the instruction in, until it ends, and decides
+against the final entry set (seeds, prologue roots, entries found from calls,
+focus and gap-walk entries), so the order in which it finds an entry cannot
+change the answer; only a kept skip's instruction is rendered, in that mode. A conditional branch whose label is the next instruction (`bne` to the
 next line) is a `CBRANCH` and nothing after it, so it keeps its `Jump`, as in
 Ghidra, where its target is an operand, not `inst_next`. A predicated branch
 whose label is the next instruction (`it eq; beq.w` to the next line) lifts to

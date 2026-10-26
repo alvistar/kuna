@@ -666,9 +666,9 @@ pub fn build_with_focus(
 /// its row. A skip from an instruction with no fall-through (`bxne lr`,
 /// `ldrne pc`, `addls pc`) that runs into another function's entry is the one
 /// way into that function, which the call graph counts, so it keeps its
-/// `Jump`; it is held, with its text rendered at decode, and decided over the
+/// `Jump`; it is held with the mode the walk decoded it in, decided over the
 /// final entry set after the walk, so the walk order cannot change which rows
-/// survive.
+/// survive, and rendered in that mode only when kept.
 ///
 /// (kuna `armpltslot`) On an ARM image a PLT stub's partial sums are not
 /// references, its slot is ([`super::kuna_pltstub`]).
@@ -1190,10 +1190,7 @@ fn descend(
                 if condition == Some(target) {
                     condition = None;
                     if c.fall_through.is_none() {
-                        if text.is_empty() {
-                            text = assembly(translate, vma, &code_space);
-                        }
-                        st.skips.push((vma, target, entry, text.clone()));
+                        st.skips.push((vma, target, entry, mode));
                     }
                 } else if condskip || Some(target) != skip {
                     st.file(vma, target, kind, &text);
@@ -1358,8 +1355,10 @@ fn descend(
         }
     }
 
-    for (from, to, entry, text) in std::mem::take(&mut st.skips) {
+    for (from, to, entry, mode) in std::mem::take(&mut st.skips) {
         if to != entry && st.funcs.contains(&to) {
+            let _selection = super::kuna_walkcontext::InstructionMode::select(arch, translate, &code_space, from, mode);
+            let text = assembly(translate, from, &code_space);
             st.file(from, to, XrefKind::Jump, &text);
         }
     }
@@ -1622,10 +1621,10 @@ struct State {
     /// The frame's own edges into one are in no other body's record, so a body
     /// that decodes it later cannot trust what it carries there.
     refused: HashSet<u64>,
-    /// Condition skips `(from, to, entry, text)` held until the walk ends: one
-    /// files a `Jump` only when `to` is then another function's entry. `text`
-    /// is rendered when the walk decodes `from`, in the mode it chose.
-    skips: Vec<(u64, u64, u64, String)>,
+    /// Condition skips `(from, to, entry, mode)` held until the walk ends: one
+    /// files a `Jump` only when `to` is then another function's entry, and only
+    /// then is `from` rendered, in the `mode` the walk decoded it in.
+    skips: Vec<(u64, u64, u64, Option<u32>)>,
 }
 
 impl State {

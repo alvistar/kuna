@@ -205,11 +205,10 @@ fn a_predicated_branch_to_the_next_instruction_keeps_its_jump() {
     assert_eq!(rows, vec![(0x100ac, XrefKind::Jump, "b.eq.w 0x100ac".to_string())]);
 }
 
-/// A kept skip carries the text of the instruction as the walk decoded it:
-/// `it_return`'s Thumb `it ne; bxne lr` has no fall-through, so its skip is the
-/// one way into `thumb_next`. With `armframes on` the walk carries the Thumb
-/// mode itself and the context database keeps A32 there, so a render after the
-/// walk would read the bytes as A32.
+/// A kept skip carries the text of the instruction in the mode the walk
+/// decoded it in: `it_return`'s Thumb `it ne; bxne lr` has no fall-through, so
+/// its skip is the one way into `thumb_next`, and it renders as Thumb with
+/// `armframes` at its default and on.
 #[test]
 fn a_kept_thumb_skip_is_rendered_as_the_walk_decoded_it() {
     let (at, entry) = (0x100be, 0x100c0);
