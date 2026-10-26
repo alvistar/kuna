@@ -38,7 +38,7 @@
 //! still open are held back, and filed as they were when it breaks or when the
 //! body drains with it open.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use kuna_base::space::{spacetype, AddrSpace};
@@ -239,42 +239,60 @@ impl<'a> Values<'a> {
     }
 
     /// Evaluate an instruction that neither touches memory nor branches and
-    /// adds a known value to `reg`, returning the sum: every write of `reg`
-    /// must be an `INT_ADD`/`INT_SUB` (or `COPY`) of a value computed from
-    /// `reg` itself, so `mov ip,#K` is no add. `add ip,ip,#N` also computes
+    /// adds a constant to `reg`, returning the sum. A value derived from `reg`
+    /// is `reg` itself, a `COPY` of a derived value, or an `INT_ADD`/`INT_SUB`
+    /// of exactly one derived value and one constant (the derived value first
+    /// for `INT_SUB`); a constant is a value the instruction computes from
+    /// constants alone. Every write of `reg` must be derived, and the last one
+    /// must have taken at least one constant step, so `mov ip,#K`,
+    /// `mov ip,ip` and `add ip,ip,ip` are no add. `add ip,ip,#N` also computes
     /// flag temporaries, which are not followed.
     fn add_to(&mut self, ops: &[FullOp], reg: &VarnodeData) -> Option<u64> {
         let reg_key = Self::key(reg)?;
-        let mut from_reg = HashSet::from([reg_key]);
+        let mut derived: HashMap<(usize, u64, u32), bool> = HashMap::from([(reg_key, false)]);
         let mut wrote = false;
         for op in ops {
             if is_memory_or_flow(op.opcode) {
                 return None;
             }
+            let step = match (op.opcode, op.ins.as_slice()) {
+                (OpCode::CPUI_COPY, [a]) => Self::derived(&derived, a),
+                (OpCode::CPUI_INT_ADD, [a, b]) => match (Self::derived(&derived, a), Self::derived(&derived, b)) {
+                    (Some(_), Some(_)) | (None, None) => None,
+                    (Some(_), None) => self.constant(&derived, b).then_some(true),
+                    (None, Some(_)) => self.constant(&derived, a).then_some(true),
+                },
+                (OpCode::CPUI_INT_SUB, [a, b]) => {
+                    Self::derived(&derived, a).filter(|_| self.constant(&derived, b)).map(|_| true)
+                }
+                _ => None,
+            };
             let evaluated = self.eval(op).is_some();
             let Some(out) = op.out.as_ref().and_then(Self::key) else { continue };
-            let derived = match (op.opcode, op.ins.as_slice()) {
-                (OpCode::CPUI_COPY | OpCode::CPUI_INT_SUB, [a, ..]) => Self::derived(&from_reg, a),
-                (OpCode::CPUI_INT_ADD, [a, b]) => Self::derived(&from_reg, a) || Self::derived(&from_reg, b),
-                _ => false,
+            match step {
+                Some(added) => derived.insert(out, added),
+                None => derived.remove(&out),
             };
-            if derived {
-                from_reg.insert(out);
-            } else {
-                from_reg.remove(&out);
-            }
             if out == reg_key {
-                if !evaluated || !derived {
+                if !evaluated || step.is_none() {
                     return None;
                 }
-                wrote = true;
+                wrote = step == Some(true);
             }
         }
         if wrote { self.value(reg) } else { None }
     }
 
-    fn derived(from_reg: &HashSet<(usize, u64, u32)>, vn: &VarnodeData) -> bool {
-        Self::key(vn).is_some_and(|key| from_reg.contains(&key))
+    /// Whether `vn` is derived from the chain register, and if so whether a
+    /// constant step was taken on the way.
+    fn derived(derived: &HashMap<(usize, u64, u32), bool>, vn: &VarnodeData) -> Option<bool> {
+        Self::key(vn).and_then(|key| derived.get(&key).copied())
+    }
+
+    /// Whether `vn` is a constant: a constant-space value, or a value this
+    /// instruction computed from constants alone.
+    fn constant(&self, derived: &HashMap<(usize, u64, u32), bool>, vn: &VarnodeData) -> bool {
+        Self::derived(derived, vn).is_none() && self.value(vn).is_some()
     }
 
     /// The slot whose word an instruction loads from a known address and then
@@ -432,6 +450,40 @@ mod tests {
         let (rows, released) = step(&mut stubs, 0x1008, &ldr_pc(&s, 0xc), &[]);
         assert_eq!(rows, vec![]);
         assert_eq!(released, vec![(0x1004, 0x101000, "text".to_string())]);
+    }
+
+    /// `add ip,ip,ip` doubles the register and `mov ip,ip` copies it: neither
+    /// adds a constant, so the chain breaks there, the `adr`'s row is filed as
+    /// it was, and the load after files no slot.
+    #[test]
+    fn a_step_must_add_one_constant() {
+        let s = spaces();
+        let double = vec![op(OpCode::CPUI_INT_ADD, Some(vn(&s.reg, IP, 4)), vec![vn(&s.reg, IP, 4), vn(&s.reg, IP, 4)])];
+        let copy = vec![op(OpCode::CPUI_COPY, Some(vn(&s.reg, IP, 4)), vec![vn(&s.reg, IP, 4)])];
+        // Each load's immediate puts the slot the old rule took at 0x100000.
+        for (step_ops, imm) in [(double, 0xfd000), (copy, 0xfe800)] {
+            let mut stubs = PltStubs::new(Some(&s.ram), MAPPED, PLT.to_vec());
+            step(&mut stubs, 0x1000, &adr(&s, 0x1800), &[(0x1800, XrefKind::Data)]);
+            let (rows, released) = step(&mut stubs, 0x1004, &step_ops, &[]);
+            assert_eq!((rows, released), (vec![], vec![(0x1000, 0x1800, "text".to_string())]));
+            assert_eq!(step(&mut stubs, 0x1008, &ldr_pc(&s, imm), &[]), (vec![], vec![]));
+        }
+    }
+
+    /// A constant the instruction computes into a temporary first is still a
+    /// constant: `add ip,ip,t` with `t = #K` is a step.
+    #[test]
+    fn a_constant_computed_in_the_instruction_is_a_step() {
+        let s = spaces();
+        let t = vn(&s.uniq, 0x200, 4);
+        let add_t = vec![
+            op(OpCode::CPUI_COPY, Some(t.clone()), vec![vn(&s.konst, 0x100000, 4)]),
+            op(OpCode::CPUI_INT_ADD, Some(vn(&s.reg, IP, 4)), vec![t, vn(&s.reg, IP, 4)]),
+        ];
+        let mut stubs = PltStubs::new(Some(&s.ram), MAPPED, PLT.to_vec());
+        step(&mut stubs, 0x1000, &adr(&s, 0x1008), &[(0x1008, XrefKind::Data)]);
+        assert_eq!(step(&mut stubs, 0x1004, &add_t, &[(0x100000, XrefKind::Data)]), (vec![], vec![]));
+        assert_eq!(step(&mut stubs, 0x1008, &ldr_pc(&s, 0x10), &[]), (vec![(0x101018, XrefKind::Read)], vec![]));
     }
 
     /// `ldm ip,{r0,pc}` loads two words and jumps to the second: the slot is
