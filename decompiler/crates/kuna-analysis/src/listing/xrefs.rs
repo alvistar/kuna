@@ -1107,7 +1107,7 @@ fn descend(
             );
             let c = classify(&raw, vma, len);
             let skip = a32_tables.as_ref().and_then(|_| c.predicated_skip(vma, len));
-            let condition = arm.then(|| c.condition_skip(vma, len)).flatten();
+            let condition = arm.then(|| c.condition_skip(&raw, vma, len)).flatten();
             let leaves = |target: u64| target != entry && seed_set.contains(&target);
             if let Some(fall) = c.fall_through.filter(|_| !waiting.is_empty()) {
                 woken.extend(waiting.remove(&fall).into_iter().flatten());

@@ -6196,10 +6196,10 @@ condition fails. The reference walk filed that `CBRANCH` as a `Jump` to the next
 instruction, one row for every predicated instruction in the program, which no
 other tool reports. Ghidra keeps a `goto inst_next` out of an instruction's
 flows (`SleighInstructionPrototype` gives it `BRANCH_TO_END`, not `JUMPOUT`).
-The resolved p-code no longer says `inst_next`, so `classify` marks the shape
-instead: a `CBRANCH` to the instruction's own fall-through that is followed by
-other ops (`Classified::predicated`, kept in the decode memo). Such a skip
-(`Classified::condition_skip`) stays one of the instruction's flows, so every
+The resolved p-code no longer says `inst_next`, so the reference walk reads the
+shape from the instruction's ops instead: a `CBRANCH` to the instruction's own
+fall-through that other ops follow (`Classified::condition_skip`). Such a skip
+stays one of the instruction's flows, so every
 walk still takes it and PIC pool composition, no-return propagation, AIF and the
 Listing walk see the same shape as before; only the reference walk files no row
 for it, unless the skip runs into the entry of another known function (a

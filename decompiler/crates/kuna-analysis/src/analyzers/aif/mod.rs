@@ -410,7 +410,7 @@ impl<'a> GapDecoder<'a> {
         if let (Some(memo), Some(certified)) = (self.memo.as_ref().filter(|_| !self.keep_ops), &reusable) {
             let decoded = &self.scratch;
             if let Some(shared) = memo.keep(vma, certified.context(), decoded.len, c.flow, c.fall_through,
-                &c.flows, c.predicated, &decoded.mnemonic, &decoded.operands) {
+                &c.flows, &decoded.mnemonic, &decoded.operands) {
                 reusable = Some(shared);
             }
         }

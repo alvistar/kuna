@@ -62,7 +62,6 @@ pub(crate) struct Recalled<'a> {
     pub(crate) flow: FlowType,
     pub(crate) fall_through: Option<u64>,
     pub(crate) flows: &'a [u64],
-    pub(crate) predicated: bool,
     pub(crate) mnemonic: &'a str,
     pub(crate) operands: &'a str,
     pub(crate) reusable: &'a Rc<ReusableDecode>,
@@ -80,15 +79,13 @@ const KINDS: [FlowKind; 9] = [
     FlowKind::Unimplemented,
 ];
 const FALLS: u16 = 1 << 15;
-const PREDICATED: u16 = 1 << 14;
 
-fn pack(flow: FlowType, falls: bool, predicated: bool) -> u16 {
+fn pack(flow: FlowType, falls: bool) -> u16 {
     let kind = KINDS.iter().position(|&k| k == flow.kind).unwrap_or_default() as u16;
     let bits = [flow.is_call, flow.is_jump, flow.is_terminal, flow.is_computed, flow.is_indirect,
         flow.is_conditional, flow.has_fallthrough];
     bits.iter().enumerate().fold(kind, |acc, (i, &on)| acc | (u16::from(on) << (4 + i)))
         | if falls { FALLS } else { 0 }
-        | if predicated { PREDICATED } else { 0 }
 }
 
 fn unpack(bits: u16) -> (FlowType, bool) {
@@ -151,7 +148,6 @@ impl DecodeMemo {
         }
         let (text, flows) = (self.text.borrow(), self.flows.borrow());
         let (flow, falls) = unpack(memo.flow);
-        let predicated = memo.flow & PREDICATED != 0;
         let first = memo.text as usize;
         let ops = first + usize::from(memo.mnemonic);
         let targets = memo.flows as usize;
@@ -160,7 +156,6 @@ impl DecodeMemo {
             flow,
             fall_through: falls.then(|| vma.wrapping_add(u64::from(memo.len))),
             flows: &flows[targets..targets + usize::from(memo.nflows)],
-            predicated,
             mnemonic: &text[first..ops],
             operands: &text[ops..ops + usize::from(memo.operands)],
             reusable,
@@ -179,7 +174,6 @@ impl DecodeMemo {
         flow: FlowType,
         fall_through: Option<u64>,
         flows: &[u64],
-        predicated: bool,
         mnemonic: &str,
         operands: &str,
     ) -> Option<Rc<ReusableDecode>> {
@@ -201,7 +195,7 @@ impl DecodeMemo {
         let memo = Memo {
             text: u32::try_from(text.len()).ok()?,
             flows: u32::try_from(targets.len()).ok()?,
-            flow: pack(flow, fall_through.is_some(), predicated),
+            flow: pack(flow, fall_through.is_some()),
             context,
             mnemonic: mnemonic8,
             operands: operands8,
@@ -259,7 +253,7 @@ pub(super) fn decode(
             operands: m.operands.to_string(),
             stored_scalar_values: Vec::new(),
         };
-        (decoded, Classified { flow: m.flow, flows: m.flows.to_vec(), fall_through: m.fall_through, predicated: m.predicated })
+        (decoded, Classified { flow: m.flow, flows: m.flows.to_vec(), fall_through: m.fall_through })
     });
     if recalled.is_some() {
         memo.reused.set(true);
@@ -272,7 +266,7 @@ pub(super) fn decode(
             .filter(|d| d.len != 0)?;
     let c = classify(&decoded.ops, vma, decoded.len);
     if let Some(context) = key {
-        memo.keep(vma, &context, decoded.len, c.flow, c.fall_through, &c.flows, c.predicated, &decoded.mnemonic, &decoded.operands);
+        memo.keep(vma, &context, decoded.len, c.flow, c.fall_through, &c.flows, &decoded.mnemonic, &decoded.operands);
     }
     Some((decoded, c))
 }

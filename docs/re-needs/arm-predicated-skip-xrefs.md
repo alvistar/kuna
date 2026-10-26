@@ -14,7 +14,7 @@ rounds: []
 first_seen_round: null
 attempts: 0
 covered_by_option: null
-touches: [decompiler/crates/kuna-analysis/src/listing/classify.rs, decompiler/crates/kuna-analysis/src/listing/xrefs.rs, decompiler/crates/kuna-analysis/src/listing/kuna_decodememo.rs]
+touches: [decompiler/crates/kuna-analysis/src/listing/classify.rs, decompiler/crates/kuna-analysis/src/listing/xrefs.rs]
 scope: small
 regression_of: null
 pr: null
@@ -120,6 +120,6 @@ _not yet refuted_
 ## Decision log
 
 - filed by hand from vendor binaries and their synthetic reduction; prior art: `arm-branch-table-xrefs`, which stopped the row for a predicated table dispatch under `armframes` only
-- `classify` marks a `CBRANCH` to the fall-through that other ops follow (`Classified::predicated`, `condition_skip`); the skip stays a flow for every consumer and only the reference walk files no row for it, under every option; a `bne` to the next instruction is a lone `CBRANCH` and keeps its row
+- `Classified::condition_skip` reads a `CBRANCH` to the fall-through that other ops follow from the instruction's ops (not stored in `Classified` or the decode memo); the skip stays a flow for every consumer and only the reference walk files no row for it, under every option; a `bne` to the next instruction is a lone `CBRANCH` and keeps its row
 - a skip that runs into another known function's entry keeps its row: the call graph reads it as a way into that function, and dropping it changed `decompile-all` output (anonymous struct numbering in 62 musl `libc.so` functions)
 - the rule is ARM-only: the same `goto inst_next` skip of x86 `cmovcc`/`rep`, AArch64 `ccmp`/`fcsel`, PPC `beqlr`, MIPS `bc1t` and the SPARC `call` keeps its row; cleaning those up is a separate change
