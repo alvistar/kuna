@@ -1124,7 +1124,7 @@ fn descend(
                     .map(|op| RawOp { opcode: op.opcode, in0: op.ins.first().cloned() }),
             );
             let c = classify(&raw, vma, len);
-            let skip = a32_tables.as_ref().filter(|_| !condskip).and_then(|_| c.predicated_skip(vma, len));
+            let skip = a32_tables.as_ref().and_then(|_| c.predicated_skip(vma, len));
             let mut condition = condskip.then(|| c.condition_skip(&raw, vma, len)).flatten();
             if let Some(fall) = c.fall_through.filter(|_| !waiting.is_empty()) {
                 woken.extend(waiting.remove(&fall).into_iter().flatten());
@@ -1194,7 +1194,7 @@ fn descend(
                         }
                         st.skips.push((vma, target, entry, text.clone()));
                     }
-                } else if Some(target) != skip {
+                } else if condskip || Some(target) != skip {
                     st.file(vma, target, kind, &text);
                 }
                 if c.flow.is_call {

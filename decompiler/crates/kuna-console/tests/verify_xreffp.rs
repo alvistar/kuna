@@ -241,3 +241,18 @@ fn armcondskip_off_files_every_skip() {
     let (at, entry) = SKIP_INTO_ENTRY;
     assert_eq!(from(&idx, at), vec![(entry, XrefKind::Jump)]);
 }
+
+/// The condition-skip rule leaves A32 table reading alone: `dispatch_last`'s
+/// `addls pc` table is still read and its cases still referenced, with
+/// `armcondskip` on and off.
+#[test]
+fn a32_tables_are_read_under_armcondskip() {
+    let off = build_with("xreffp_strip_arm_le32", |arch| {
+        arch.set_kuna_option("armcondskip", "off").expect("armcondskip flips off");
+    });
+    for idx in [build("xreffp_strip_arm_le32"), off] {
+        let tables: Vec<_> = idx.switch_tables().iter().map(|t| (t.dispatch, t.cases.clone())).collect();
+        assert_eq!(tables.len(), 1, "{tables:?}");
+        assert_eq!(tables[0].0, 0x10084);
+    }
+}
