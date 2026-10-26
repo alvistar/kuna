@@ -136,3 +136,4 @@ _not yet refuted_
 
 - filed by hand from vendor binaries and their synthetic reduction; prior art: `arm-pic-got-xrefs`
 - the walk recognises `reg = constant`, one or two `reg += constant`, then a `BRANCHIND` through a load of `reg + constant`; the chain files no constant data row and the load files the slot as a read; the slot's word (the PLT resolver) is not followed
+- the matcher follows the chain as the walk decodes it (rows of an open chain held, released when it breaks or the body drains) instead of decoding ahead, so it uses the walk's mode selection and commits no context out of order

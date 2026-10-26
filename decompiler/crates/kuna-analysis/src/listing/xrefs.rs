@@ -770,7 +770,7 @@ fn descend(
 
     // Reused across every decode in the walk (see [`FullCapture`]).
     let mut cap = FullCapture::default();
-    let mut plt_stubs = PltStubs::default();
+    let mut plt_stubs = PltStubs::new(data_space.as_ref());
     let arm = file.architecture() == object::Architecture::Arm;
     let mut raw: Vec<RawOp> = Vec::new();
 
@@ -1123,9 +1123,6 @@ fn descend(
                 let fall_through = vma.wrapping_add(len as u64);
                 data_refs(cap.ops(), data_space.as_ref(), &mapped, fall_through, pool.as_ref())
             };
-            // (kuna) `pltstub`: a PLT stub's partial sums are not references,
-            // its slot is. See [`super::kuna_pltstub`].
-            plt_stubs.rewrite(translate, &code_space, data_space.as_ref(), vma, len, cap.ops(), &mut drefs);
             // (kuna) `picpool`: the address a PC-relative literal-pool pair forms,
             // which is in neither of its two instructions on its own. See
             // [`super::kuna_picpool`].
@@ -1157,6 +1154,14 @@ fn descend(
             };
             if let Some(word) = pointer {
                 held.push((vma, word, text.clone()));
+            }
+            // (kuna) `pltstub`: a PLT stub's partial sums are not references,
+            // its slot is. See [`super::kuna_pltstub`].
+            for (from, to, text) in plt_stubs.step(vma, len, cap.ops(), &mut drefs, &text) {
+                st.file(from, to, XrefKind::Data, &text);
+            }
+            if text.is_empty() && !drefs.is_empty() {
+                text = assembly(translate, vma, &code_space);
             }
 
             if cap.ops().iter().any(|op| op.opcode == OpCode::CPUI_CALLIND) {
@@ -1282,6 +1287,9 @@ fn descend(
             }
         }
 
+        for (from, to, text) in plt_stubs.drain() {
+            st.file(from, to, XrefKind::Data, &text);
+        }
         let verdict = picpool.finish(&st.refused);
         for (vma, word, text) in held {
             if !verdict.displaced.contains(&vma) {

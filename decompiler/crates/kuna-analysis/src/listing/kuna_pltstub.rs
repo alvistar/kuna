@@ -25,6 +25,12 @@
 //! slot as a [`XrefKind::Read`]. The values are only `COPY`/`INT_ADD`/`INT_SUB`
 //! of constants, so no other instruction shape matches, and a run that leaves
 //! the shape at any step keeps the rows the generic rule gives it.
+//!
+//! The chain is followed in the walk's own order: each instruction is the one
+//! the walk decoded, in the mode it chose, and a chain waits for the walk to
+//! decode the instruction at its fall-through. The constant rows of a chain
+//! still open are held back, and filed as they were when it breaks or when the
+//! body drains with it open.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -32,93 +38,103 @@ use std::rc::Rc;
 use kuna_base::space::{spacetype, AddrSpace};
 use kuna_num::opcodes::OpCode;
 use kuna_num::pcoderaw::VarnodeData;
-use kuna_sleigh::translate::Translate;
 
-use super::xrefs::{decode, FullCapture, FullOp, XrefKind};
+use super::xrefs::{FullOp, XrefKind};
 
 /// The most constant adds a chain may take before its load: one in the
 /// standard entry, two with `--long-plt`.
 const MAX_ADDS: usize = 2;
 
-/// What one instruction of a recognised chain contributes.
-#[derive(Clone, Copy)]
-enum Role {
-    /// Builds a partial address: files no constant row.
-    Partial,
-    /// Loads the slot and jumps through it: files the slot.
-    Load(u64),
+/// A constant row held back: `(from, to, instruction text)`.
+pub(super) type Held = (u64, u64, String);
+
+/// A chain the walk is following.
+struct Chain {
+    /// The register the chain builds the address in, and its value.
+    reg: VarnodeData,
+    value: u64,
+    /// The constant adds taken so far.
+    adds: usize,
+    held: Vec<Held>,
 }
 
-/// The chains recognised so far, keyed by the VMA of each instruction in them.
-#[derive(Default)]
-pub(super) struct PltStubs {
-    roles: HashMap<u64, Role>,
+/// The chains one body's walk has open, keyed by the VMA of the instruction
+/// each expects next.
+pub(super) struct PltStubs<'a> {
+    data_space: Option<&'a Rc<AddrSpace>>,
+    open: HashMap<u64, Chain>,
 }
 
-impl PltStubs {
-    /// Recognise a chain starting at `vma` (of byte length `len`, lifted to
-    /// `ops`) when it has not been seen, then rewrite `drefs` for the
-    /// instruction's role in any chain.
-    pub(super) fn rewrite(
+impl<'a> PltStubs<'a> {
+    pub(super) fn new(data_space: Option<&'a Rc<AddrSpace>>) -> Self {
+        PltStubs { data_space, open: HashMap::new() }
+    }
+
+    /// Take the instruction at `vma` (`len` bytes, lifted to `ops`, rendered
+    /// `text`) as the walk decodes it: continue the chain that expects it, or
+    /// start one. A chain's constant rows leave `drefs` while it is open, and
+    /// the load that ends it gets its slot as a `Read`. Returns the rows of
+    /// the chains this instruction broke, to file as they were.
+    pub(super) fn step(
         &mut self,
-        translate: &dyn Translate,
-        code_space: &Rc<AddrSpace>,
-        data_space: Option<&Rc<AddrSpace>>,
         vma: u64,
         len: u32,
         ops: &[FullOp],
         drefs: &mut Vec<(u64, XrefKind)>,
-    ) {
-        if !self.roles.contains_key(&vma) && drefs.iter().any(|&(_, kind)| kind == XrefKind::Data) {
-            if let Some(chain) = chain_at(translate, code_space, data_space, vma, len, ops) {
-                self.roles.extend(chain);
-            }
-        }
-        match self.roles.get(&vma) {
-            Some(Role::Partial) => drefs.retain(|&(_, kind)| kind != XrefKind::Data),
-            Some(&Role::Load(slot)) => {
-                drefs.retain(|&(_, kind)| kind != XrefKind::Data);
-                if !drefs.contains(&(slot, XrefKind::Read)) {
-                    drefs.push((slot, XrefKind::Read));
+        text: &str,
+    ) -> Vec<Held> {
+        let next = vma.wrapping_add(u64::from(len));
+        let mut released = Vec::new();
+        if let Some(mut chain) = self.open.remove(&vma) {
+            let mut values = Values::holding(self.data_space, &chain);
+            if chain.adds > 0 {
+                if let Some(slot) = values.load_jump(ops) {
+                    drefs.retain(|&(_, kind)| kind != XrefKind::Data);
+                    if !drefs.contains(&(slot, XrefKind::Read)) {
+                        drefs.push((slot, XrefKind::Read));
+                    }
+                    return released;
                 }
             }
-            None => {}
+            if chain.adds < MAX_ADDS {
+                if let Some(value) = values.add_to(ops, &chain.reg) {
+                    chain.value = value;
+                    chain.adds += 1;
+                    hold(&mut chain.held, vma, drefs, text);
+                    released.extend(self.open.insert(next, chain).into_iter().flat_map(|c| c.held));
+                    return released;
+                }
+            }
+            released = chain.held;
         }
-    }
-}
-
-/// The chain whose first instruction is the one at `vma`, as the role of each
-/// of its instructions.
-fn chain_at(
-    translate: &dyn Translate,
-    code_space: &Rc<AddrSpace>,
-    data_space: Option<&Rc<AddrSpace>>,
-    vma: u64,
-    len: u32,
-    ops: &[FullOp],
-) -> Option<Vec<(u64, Role)>> {
-    let mut values = Values::new(data_space);
-    let (reg, _) = values.single_write(ops)?;
-    let mut roles = vec![(vma, Role::Partial)];
-    let mut cap = FullCapture::default();
-    let mut at = vma.wrapping_add(u64::from(len));
-    for adds in 0..=MAX_ADDS {
-        let len = decode(translate, at, code_space, &mut cap)?;
-        values.keep_only(&reg);
-        if adds > 0 {
-            if let Some(slot) = values.load_jump(cap.ops()) {
-                roles.push((at, Role::Load(slot)));
-                return Some(roles);
+        if drefs.iter().any(|&(_, kind)| kind == XrefKind::Data) {
+            if let Some((reg, value)) = Values::new(self.data_space).single_write(ops) {
+                let mut chain = Chain { reg, value, adds: 0, held: Vec::new() };
+                hold(&mut chain.held, vma, drefs, text);
+                released.extend(self.open.insert(next, chain).into_iter().flat_map(|c| c.held));
             }
         }
-        values.add_to(cap.ops(), &reg)?;
-        roles.push((at, Role::Partial));
-        at = at.wrapping_add(u64::from(len));
+        released
     }
-    None
+
+    /// The rows of every chain still open when the body drains, to file as
+    /// they were.
+    pub(super) fn drain(&mut self) -> Vec<Held> {
+        self.open.drain().flat_map(|(_, chain)| chain.held).collect()
+    }
 }
 
-/// Constant values of registers and temporaries along a chain.
+/// Move the constant rows of the instruction at `vma` out of `drefs`.
+fn hold(held: &mut Vec<Held>, vma: u64, drefs: &mut Vec<(u64, XrefKind)>, text: &str) {
+    drefs.retain(|&(to, kind)| {
+        if kind == XrefKind::Data {
+            held.push((vma, to, text.to_string()));
+        }
+        kind != XrefKind::Data
+    });
+}
+
+/// Constant values of registers and temporaries in one instruction.
 struct Values<'a> {
     data_space: Option<&'a Rc<AddrSpace>>,
     known: HashMap<(usize, u64, u32), u64>,
@@ -129,11 +145,14 @@ impl<'a> Values<'a> {
         Values { data_space, known: HashMap::new() }
     }
 
-    /// Forget every value but `reg`'s: temporaries do not outlive their
-    /// instruction.
-    fn keep_only(&mut self, reg: &VarnodeData) {
-        let key = Self::key(reg);
-        self.known.retain(|k, _| Some(*k) == key);
+    /// The values at the start of an instruction a chain reaches: only its
+    /// register's.
+    fn holding(data_space: Option<&'a Rc<AddrSpace>>, chain: &Chain) -> Self {
+        let mut values = Self::new(data_space);
+        if let Some(key) = Self::key(&chain.reg) {
+            values.known.insert(key, chain.value);
+        }
+        values
     }
 
     fn key(vn: &VarnodeData) -> Option<(usize, u64, u32)> {
@@ -190,9 +209,9 @@ impl<'a> Values<'a> {
     }
 
     /// Evaluate an instruction that neither touches memory nor branches and
-    /// leaves `reg` holding a known value: `add ip,ip,#N` also computes flag
-    /// temporaries, which are not followed.
-    fn add_to(&mut self, ops: &[FullOp], reg: &VarnodeData) -> Option<()> {
+    /// leaves `reg` holding a known value, which it returns: `add ip,ip,#N`
+    /// also computes flag temporaries, which are not followed.
+    fn add_to(&mut self, ops: &[FullOp], reg: &VarnodeData) -> Option<u64> {
         let mut wrote = false;
         for op in ops {
             if is_memory_or_flow(op.opcode) {
@@ -206,7 +225,7 @@ impl<'a> Values<'a> {
                 wrote = true;
             }
         }
-        wrote.then_some(())
+        if wrote { self.value(reg) } else { None }
     }
 
     /// The slot an instruction loads from a known address and then jumps
