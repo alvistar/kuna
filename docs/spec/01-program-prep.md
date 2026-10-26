@@ -6202,11 +6202,14 @@ the rows the constant scan gives it, so an `adr` whose register is then used any
 other way is still a reference. GCC 14 for armhf emits the A32 stub for Thumb code
 too; the Thumb-only PLT (`--thumb-plt`, M-profile) is not recognised.
 `--option armpltslot off` follows no chain, so every stub files the constant
-scan's rows again. The call graph reads the reference rows, and the analyses
-that read it number anonymous structs in a different order once those rows go:
-on musl `libstdc++.so` for ARM, 272 functions name their anonymous structs
-differently with the option on (`struct_4` becomes `struct_0`), and their code
-is otherwise identical. Off gives the earlier output byte for byte.
+scan's rows again. The call graph reads the reference rows, so `decompile-all`
+can visit functions in a different callee-first order, and the shared type
+factory hands out the first free `struct_N` in that order
+(`decompiler/crates/kuna-decomp/src/p5_types/kuna_structsynth/ledger.rs`). In
+the comparisons made, only anonymous struct numbering changed: on musl
+`libstdc++.so` for ARM, 272 of 5832 functions, each byte-identical under a
+one-to-one renaming of its `struct_N` names. Off gives the earlier output byte
+for byte.
 
 (kuna) **Condition skips** (`armcondskip`, default on). SLEIGH lifts a predicated instruction (`ldrne`,
 `moveq`, `popeq {..,pc}`, `bxne r3`, an instruction in a Thumb `it` block) to a
@@ -6246,10 +6249,11 @@ ahead of the ops of x86 `cmovcc` and `rep` string instructions, AArch64 `ccmp`,
 and the SPARC `call`, and on those architectures each still files a `Jump` to its
 own fall-through. `--option armcondskip off` gives the earlier rule on ARM too:
 every skip files its `Jump`, except the predicated skip of an A32 table dispatch
-whose table `armframes` reads. As with `armpltslot`, the rows the call graph
-reads change the numbering of anonymous structs in some functions (62 functions
-of musl `libc.so` for ARM, with otherwise identical code); off gives the earlier
-output byte for byte.
+whose table `armframes` reads. As with `armpltslot`, the call graph reads these
+rows, and in the comparisons made only anonymous struct numbering changed: 62
+of 2063 functions of musl `libc.so` for ARM (59 of its stripped copy), each
+byte-identical under a one-to-one renaming of its `struct_N` names. Off gives
+the earlier output byte for byte.
 
 (kuna) Every rule above widens what the walk reads out of an instruction it
 reached; the complementary defect is the instructions it never reaches at all.
