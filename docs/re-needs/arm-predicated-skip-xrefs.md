@@ -13,7 +13,7 @@ challenges: []
 rounds: []
 first_seen_round: null
 attempts: 0
-covered_by_option: armcondskip
+covered_by_option: null
 touches: [decompiler/crates/kuna-analysis/src/listing/classify.rs, decompiler/crates/kuna-analysis/src/listing/xrefs.rs]
 scope: small
 regression_of: null

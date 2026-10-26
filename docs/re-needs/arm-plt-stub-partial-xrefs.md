@@ -13,7 +13,7 @@ challenges: []
 rounds: []
 first_seen_round: null
 attempts: 0
-covered_by_option: armpltslot
+covered_by_option: null
 touches: [decompiler/crates/kuna-analysis/src/listing/xrefs.rs, decompiler/crates/kuna-analysis/src/listing/kuna_pltstub.rs]
 scope: small
 regression_of: null
