@@ -225,6 +225,7 @@ fn armframes_off_reads_no_a32_table() {
         let jumps: Vec<(u64, XrefKind)> =
             from(&idx, sw.dispatch).into_iter().filter(|&(_, kind)| kind == XrefKind::Jump).collect();
         assert!(jumps.is_empty(), "{:#x}: {jumps:?}", sw.dispatch);
+        assert!(idx.function_containing(sw.dispatch).is_some(), "{:#x}", sw.dispatch);
         assert_eq!(idx.function_containing(sw.dispatch + 4), idx.function_containing(sw.dispatch), "{:#x}", sw.dispatch);
         assert!(idx.switch_tables().iter().all(|t| t.dispatch != sw.dispatch), "{:#x}", sw.dispatch);
         for c in &sw.cases {
