@@ -41,8 +41,8 @@ const PREDICATED: [(u64, u64); 9] = [
 /// `next_branch`'s `bne` whose label is the next instruction, and `main`'s
 /// `beq` to its `bl abort`.
 const BRANCHES: [(u64, u64); 2] = [(0x10588, 0x1058c), (0x103f4, 0x10404)];
-/// `_start`'s pool word, decoded as a predicated `andeq`, whose skip runs into
-/// the entry of `_start_c`.
+/// `_start`'s pool word, decoded as a predicated `andeq`, whose skip and
+/// fall-through both run into the entry of `_start_c`.
 const SKIP_INTO_ENTRY: (u64, u64) = (0x10430, 0x10434);
 
 fn repo_root() -> PathBuf {
@@ -132,13 +132,14 @@ fn conditional_branches_keep_their_jump() {
     assert_eq!(idx.function_containing(0x1057a), Some(0x10570));
 }
 
-/// A skip that runs into another function's entry is a way into that function,
-/// which the call graph counts, so it keeps its jump.
+/// A skip that runs into another function's entry from an instruction that
+/// also falls through there is no way in of its own: its fall-through
+/// reaches the same entry, so it files nothing.
 #[test]
-fn a_skip_into_another_entry_keeps_its_jump() {
+fn a_skip_that_falls_through_into_an_entry_files_nothing() {
     let (at, entry) = SKIP_INTO_ENTRY;
     assert!(index().is_function_entry(entry));
-    assert_eq!(from(index(), at), vec![(entry, XrefKind::Jump)]);
+    assert_eq!(from(index(), at), vec![]);
 }
 
 /// The condition skip is an ARM rule: off ARM, an instruction whose own skip
@@ -152,15 +153,15 @@ fn a_condition_skip_off_arm_keeps_its_jump() {
 }
 
 /// On the stripped `xreffp_strip_arm_le32`, `found_by_call` is found only from
-/// `_start`'s `bl`, after the walk has queued it: the `moveq` skip that runs
-/// into it from `falls_in` still keeps its jump, under both `armframes`
-/// settings.
+/// `_start`'s `bl`, after the walk has queued it: the `moveq` that runs into
+/// it from `falls_in` falls through there too, so its skip files nothing,
+/// under both `armframes` settings.
 #[test]
-fn a_skip_into_an_entry_found_from_a_call_keeps_its_jump() {
+fn a_skip_that_falls_through_into_an_entry_found_from_a_call_files_nothing() {
     let (at, entry) = (0x10074, 0x10078);
     for idx in [build("xreffp_strip_arm_le32"), build_with("xreffp_strip_arm_le32", armframes_off)] {
         assert!(idx.is_function_entry(entry));
-        assert_eq!(from(&idx, at), vec![(entry, XrefKind::Jump)]);
+        assert_eq!(from(&idx, at), vec![]);
     }
 }
 
@@ -168,10 +169,11 @@ fn armframes_off(arch: &mut Architecture) {
     arch.set_kuna_option("armframes", "off").expect("armframes flips off");
 }
 
-/// An A32 table dispatch's skip is a condition skip like any other: when it
-/// runs into the next function's entry (`dispatch_last`'s `addls pc` into
-/// `after_dispatch`) it keeps its jump, whether `armframes` reads the table or
-/// not.
+/// An A32 table dispatch's skip is a condition skip like any other, and a
+/// dispatch has no fall-through: when its skip runs into the next function's
+/// entry (`dispatch_last`'s `addls pc` into `after_dispatch`, found only from
+/// a call) it is the one way in there and keeps its jump, whether `armframes`
+/// reads the table or not.
 #[test]
 fn a_dispatch_skip_into_an_entry_keeps_its_jump() {
     let (at, entry) = (0x10084, 0x10088);

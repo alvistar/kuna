@@ -6215,11 +6215,15 @@ fall-through that other ops follow (`Classified::condition_skip`). Such a skip
 stays one of the instruction's flows, so every
 walk still takes it and PIC pool composition, no-return propagation, AIF and the
 Listing walk see the same shape as before; only the reference walk files no row
-for it, unless the skip runs into the entry of another function (a
-predicated last instruction, or a pool word decoded as `andeq`, right before the
-next function). That edge is a way into the other function, which the call
-graph counts among its callers and tail jumps (`callbacktype`, `calleevote`), so
-it keeps its `Jump`. The walk holds each skip until it ends and decides against
+for it, unless the skip runs into the entry of another function from an
+instruction with no fall-through of its own (`bxne lr`, `ldrne pc`, `popne
+{..,pc}`, the `addls pc` of a table dispatch) right before that function. Then
+the skip is the one way into the other function, which the call graph counts
+among its callers and tail jumps (`callbacktype`, `calleevote`), so it keeps its
+`Jump`. A predicated instruction that falls through (`ldrne`, `moveq`, `strne`,
+a pool word decoded as `andeq`) reaches the same entry by its fall-through,
+which files no row either, so its skip files nothing. The walk holds each kept
+skip until it ends and decides against
 the final entry set (seeds, prologue roots, entries found from calls, focus and
 gap-walk entries), so the order in which it finds an entry cannot change the
 answer. A conditional branch whose label is the next instruction (`bne` to the

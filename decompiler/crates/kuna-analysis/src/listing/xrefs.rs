@@ -1175,7 +1175,9 @@ fn descend(
                 // The skip leads `flows`; a predicated branch whose label is
                 // the next instruction (`it eq; beq.w`) repeats the target.
                 if Some(target) == condition.take_if(|&mut skip| skip == target) {
-                    st.skips.push((vma, target, entry));
+                    if c.fall_through.is_none() {
+                        st.skips.push((vma, target, entry));
+                    }
                 } else {
                     st.file(vma, target, kind, &text);
                 }

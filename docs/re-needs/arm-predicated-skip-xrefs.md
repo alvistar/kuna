@@ -125,3 +125,4 @@ _not yet refuted_
 - the rule is ARM-only: the same `goto inst_next` skip of x86 `cmovcc`/`rep`, AArch64 `ccmp`/`fcsel`, PPC `beqlr`, MIPS `bc1t` and the SPARC `call` keeps its row; cleaning those up is a separate change
 - the cross-entry rule is decided after the walk over every entry it found (the first version checked only the seeds, so a skip into an entry found from a call lost its row on a stripped image); `xreffp_strip_arm_le32` covers it
 - only the first flow equal to the skip is the skip: a predicated branch to the next instruction (`it eq; beq.w`, flows `[next, next]`) keeps the branch's row
+- a skip into an entry is kept only from an instruction with no fall-through (`bxne lr`, `ldrne pc`, `addls pc`): a predicated `ldrne`/`moveq`/`andeq` right before an entry reaches it by its fall-through too, so its skip is no way in of its own and files nothing; this renumbers anonymous structs in 62 musl `libc.so` functions, like the PLT rule in `libstdc++.so`
