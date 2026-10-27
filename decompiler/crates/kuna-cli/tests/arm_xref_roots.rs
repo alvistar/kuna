@@ -328,7 +328,9 @@ fn aif_supported_prefix_remains_the_caller_in_both_query_directions() {
 
 /// Without `funcstart_patterns` no frame is walked: the queried 0x1500 is walked
 /// after the gap walk, so the `aifcount` arm's twentieth function, and its row,
-/// come only from the gap walk's second pass.
+/// come only from the gap walk's second pass. Known limit: in the
+/// `aiffingerprint` arm without `funcstart_patterns`, the gap walk enters the
+/// caller mid-body, so the row's owner is 0x1554, not 0x1550.
 #[test]
 fn aif_uses_the_function_count_and_fingerprints_after_frames_are_walked() {
     for variant in ["aifcount", "aiffingerprint"] {
@@ -356,7 +358,6 @@ fn aif_uses_the_function_count_and_fingerprints_after_frames_are_walked() {
                         patterns,
                     ],
                 );
-                // Known limit: with no frame walked, the gap walk enters this caller mid-body.
                 let owner = if variant == "aiffingerprint" && patterns == "off" {
                     0x1554
                 } else {

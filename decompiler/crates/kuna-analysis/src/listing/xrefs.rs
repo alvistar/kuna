@@ -641,13 +641,15 @@ pub fn build_measured(
 /// never re-attribute an instruction some other entry already owns. An address
 /// that does not decode is dropped rather than recorded as a function.
 ///
-/// With `aif` on and no frame recovery (`gapwalk && !prologues`: any architecture
-/// but ARM, and ARM unless both `funcstart_patterns` and `armframes on`), a focus
-/// address also waits for the speculative gap walk. Walked first, a focus address
-/// inside a function only the gap walk finds decodes part of that body, the gap
-/// walk then refuses the function as a fragment of decoded code (`aifbracket`),
-/// and the query answers without it. If the focus walk decodes new code, the gap
-/// walk runs once more over only the gaps next to that code.
+/// With `aif` on and no frame recovery, a focus address also waits for the
+/// speculative gap walk. Frame recovery (`prologues`) needs all of: an ARM image,
+/// a seed inside its executable sections, `funcstart_patterns` on and `armframes
+/// on` (not `inventory`). Walked first, a focus address inside a function only the
+/// gap walk finds decodes part of that body, the gap walk then refuses the
+/// function as a fragment of decoded code (`aifbracket`), and the query answers
+/// without it. If the focus walk decodes new code, the gap walk runs once more:
+/// over every gap when a gate stopped the first pass before any probe, else over
+/// only the gaps next to that code.
 ///
 /// Callers: `kuna xrefs` and the inspector's `function_xrefs` (kuna-console,
 /// served by kuna-wasm).
