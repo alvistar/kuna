@@ -338,6 +338,10 @@ fn aif_uses_the_function_count_and_fingerprints_after_frames_are_walked() {
                 &[variant],
             );
             for patterns in ["off", "on"] {
+                // Without patterns no frame is walked: only the queried 0x1500 could add the fourth fingerprint.
+                if variant == "aiffingerprint" && patterns == "off" {
+                    continue;
+                }
                 let to = query(
                     &path,
                     "--to",

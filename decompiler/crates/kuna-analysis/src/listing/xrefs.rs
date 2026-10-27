@@ -640,6 +640,13 @@ pub fn build_measured(
 /// already in `decoded` and skipped, so a focus address can only ADD coverage,
 /// never re-attribute an instruction some other entry already owns. An address
 /// that does not decode is dropped rather than recorded as a function.
+///
+/// Without frame recovery (`armframes on` with `funcstart_patterns`) a focus address also waits for
+/// the speculative gap walk (`aif`). Walked first, a focus address inside a
+/// function only the gap walk finds decodes part of that body, the gap walk then
+/// refuses the function as a fragment of decoded code (`aifbracket`), and the
+/// query answers without it. Code the focus walk decodes is corpus the gap walk
+/// did not see, so the gap walk runs once more after it.
 pub fn build_with_focus(
     file: &object::File,
     arch: &Architecture,
@@ -821,12 +828,15 @@ fn descend(
     let mut walked: HashSet<u64> = HashSet::new();
 
     // The caller-named addresses the seeded walk did not already cover, tried one
-    // at a time once the queue drains (see [`build_with_focus`]).
+    // at a time once the queue drains, and the gap walk too unless frames are
+    // recovered (see [`build_with_focus`]).
     let mut pending_focus: Vec<u64> =
         focus.iter().copied().filter(|f| !seed_set.contains(f)).collect();
     pending_focus.sort_unstable();
     pending_focus.dedup();
     pending_focus.reverse();
+    let mut deferred_focus = if gapwalk && !prologues { std::mem::take(&mut pending_focus) } else { Vec::new() };
+    let mut focus_decoded_from: Option<usize> = None;
     let mut focused: Vec<u64> = Vec::new();
 
     loop {
@@ -1000,6 +1010,15 @@ fn descend(
                             .as_ref(),
                     );
                     pending_focus.extend(found.into_iter().rev());
+                    continue;
+                }
+                None if !deferred_focus.is_empty() => {
+                    pending_focus = std::mem::take(&mut deferred_focus);
+                    focus_decoded_from = Some(st.decoded.len());
+                    continue;
+                }
+                None if focus_decoded_from.take().is_some_and(|before| st.decoded.len() > before) => {
+                    gapwalk_done = false;
                     continue;
                 }
                 None => {

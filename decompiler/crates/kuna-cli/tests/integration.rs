@@ -72,6 +72,9 @@ mod arm_wrapper_returns;
 #[path = "arm_xref_roots.rs"]
 mod arm_xref_roots;
 
+#[path = "arm_gapfocus.rs"]
+mod arm_gapfocus;
+
 #[path = "thumbswitch_guards.rs"]
 mod thumbswitch_guards;
 

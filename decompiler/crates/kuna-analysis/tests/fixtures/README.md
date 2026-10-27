@@ -1387,6 +1387,14 @@ return, a call to a stub that never returns and literal-pool words: the first
 pool decodes as valid instructions that fall into the next frame, the second
 does not decode. Tests generate the images in Cargo scratch directories; no
 generated binary is retained.
+
+`arm_gapfocus_le32.py` (`python3 arm_gapfocus_le32.py OUTPUT`) generates a stripped
+A32 ELF the same way: an entry that calls twenty leaves, then, behind a four-word
+literal pool, a function with no inbound reference that calls a leaf, branches to a
+block that jumps back into its body, and dispatches through a guarded
+`addls pc,pc,r0,lsl #2` table. Only the gap walk finds that function. The CLI test
+`arm_gapfocus.rs` queries addresses inside it.
+
 `lifetimes_partial_windows_x64` is an asset-free Windows-ABI ELF for #810.
 It initializes a three-byte RGB object in the home area, then reuses the same
 eight bytes for a pointer. Native controls include blue255; the CLI test executes
