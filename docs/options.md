@@ -636,6 +636,11 @@ Three tiers:
 | an arm ldrne or moveq is listed as a jump source | [`armcondskip`](#armcondskip) |
 | xrefs --to an arm instruction lists the predicated instruction before it as a jump | [`armcondskip`](#armcondskip) |
 | thumb it-block instructions each file a jump to the next instruction | [`armcondskip`](#armcondskip) |
+| kuna xrefs misses a got slot read whose base register was set many instructions earlier | [`picpoolreach`](#picpoolreach) |
+| a function that loads its got base with a far apart ldr and add pc pair has no got references | [`picpoolreach`](#picpoolreach) |
+| xrefs --from a pic arm function lists no .got rows | [`picpoolreach`](#picpoolreach) |
+| a got base reloaded from the stack files no slot reads | [`picpoolreach`](#picpoolreach) |
+| a string whose pc-relative load is split by a branch has no owning function | [`picpoolreach`](#picpoolreach) |
 | unresolved *(gp + offset) loads on mips | [`mips_gp`](#mips_gp) |
 | got/.sdata references never fold to real addresses in a pic mips binary | [`mips_gp`](#mips_gp) |
 | i386 pie libc calls render as sub_<addr> instead of exit/dcgettext | [`i386_pie_plt`](#i386_pie_plt) |
@@ -2599,6 +2604,14 @@ Program-prep enablement: what is discovered, decoded, and named before any funct
 - **When to flip:** On (default): kuna xrefs on ARM code lists no jump from a predicated ldrne, moveq or strne to the instruction after it, and xrefs --to an instruction that follows one does not name its predecessor as a jump source. Flip off to restore a Jump row for every predicated instruction's skip, for example to compare with a tool or an earlier kuna run that lists them, or to get the anonymous struct numbering of earlier output back.
 - **Where / provenance:** P1/code-data-partition · kuna · correctness-fix · kuna-analysis-armcondskip
 - **Example:** `--option armcondskip off`
+
+### `picpoolreach` -- on | off, default `on`
+
+- **Symptoms:** kuna xrefs misses a got slot read whose base register was set many instructions earlier; a function that loads its got base with a far apart ldr and add pc pair has no got references; xrefs --from a pic arm function lists no .got rows; a got base reloaded from the stack files no slot reads; a string whose pc-relative load is split by a branch has no owning function.
+- **What it does:** In a position-independent ARM image, the reference walk (picpool) keeps a literal-pool word in its register until the register is written, instead of for eight instructions along fall-through only, and follows a GOT base through a stack slot. On, a pool word travels every edge of the function (fall-through, branches, switch cases) like a GOT base, with at most eight words carried into one instruction (the youngest kept); a word a predicated load produced is still believed for eight instructions only. A GOT base stored through the stack pointer (str r3,[sp,#4], push {r4}) is tracked at its offset from the stack pointer, re-offset as the pointer moves, until a store through the stack pointer overwrites it or the pointer takes a value the fold cannot follow, and a load of the slot is a base again; frame-pointer slots are not followed. So a GOT base pair scheduled more than eight instructions apart, a GOT offset hoisted ahead of its slot load, a PC pair split by a branch, and a base spilled and reloaded each file their slot read, the slot's word and the composed address. Off restores the eight-instruction, fall-through-only window and no stack slots. The call graph reads these rows, so decompile-all can visit functions in a different callee-first order: on musl libc.so for ARM 104 of 2063 functions differ, 99 only in anonymous struct_N numbering and 5 in how a callee's result is typed after the order change. Off gives the earlier output byte for byte.
+- **When to flip:** On (default): kuna xrefs --to a GOT slot or a string lists the loads that reach it through a register set far away, across a branch, or reloaded from the stack. Flip off to compare with an earlier kuna run, or to get the earlier decompile-all order and struct numbering back.
+- **Where / provenance:** P1/code-data-partition · kuna · correctness-fix · kuna-analysis-picpoolreach
+- **Example:** `--option picpoolreach off`
 
 ### `mips_gp` -- on | off, default `on`
 

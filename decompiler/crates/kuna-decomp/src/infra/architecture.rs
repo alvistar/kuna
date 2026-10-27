@@ -1981,6 +1981,9 @@ pub struct Architecture {
     /// (kuna) `armcondskip`: on ARM the skip a predicated instruction lifts to
     /// files no `Jump` to the next instruction; default on.
     pub analysis_armcondskip: bool,
+    /// (kuna) `picpoolreach`: a pool word lives until its register is
+    /// written and a GOT base is followed through a stack slot; default on.
+    pub analysis_picpoolreach: bool,
     /// (kuna) Gate the entry-reachable Thumb context walk (`entrythumbflow`) for a
     /// mixed ARM image whose container entry carries the Thumb bit but whose
     /// machine word makes no whole-image mode claim; default on. The walk decodes
@@ -3136,6 +3139,7 @@ impl Architecture {
             analysis_armwalkmode: false,
             analysis_armpltslot: false,
             analysis_armcondskip: false,
+            analysis_picpoolreach: false,
             analysis_entrythumbflow: false,
             analysis_mips_gp: false,
             analysis_i386_pie_plt: false,
@@ -3562,6 +3566,7 @@ impl Architecture {
         self.analysis_armwalkmode = true; // (kuna) ARM walk decodes in the mode its control flow carries
         self.analysis_armpltslot = true; // (kuna) ARM PLT stub files its slot, not its partial sums
         self.analysis_armcondskip = true; // (kuna) ARM condition skip files no jump to the next instruction
+        self.analysis_picpoolreach = true; // (kuna) pool words live until written; GOT bases through stack slots
         self.analysis_entrythumbflow = true; // (kuna) entry-reachable Thumb context default-on; inert without a Thumb-bit entry
         self.analysis_mips_gp = true;
         self.analysis_i386_pie_plt = true; // (kuna) i386-PIE PLT decode default-on (angr)

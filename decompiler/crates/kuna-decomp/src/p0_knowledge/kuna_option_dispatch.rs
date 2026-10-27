@@ -990,6 +990,7 @@ kuna_options! { self, p1;
     "armwalkmode" => on_off!(analysis_armwalkmode, "ARM decode mode carried along the Listing walk"),
     "armpltslot" => on_off!(analysis_armpltslot, "ARM PLT stub slot reference"),
     "armcondskip" => on_off!(analysis_armcondskip, "ARM condition skips filed as no jump"),
+    "picpoolreach" => on_off!(analysis_picpoolreach, "pool words tracked until written"),
     "entrythumbflow" => {
         on_off!(analysis_entrythumbflow, "Entry-reachable Thumb context walk")
     },

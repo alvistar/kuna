@@ -171,6 +171,10 @@ pub(super) struct Image<'a> {
     /// The stack pointer's register offset and size, which a spilled GOT base
     /// is found through.
     pub sp: Option<(u64, u32)>,
+    /// (`picpoolreach`) A pool word lives until its register is written and a
+    /// base is followed through a stack slot; off, a word travels fall-through
+    /// alone for [`MAX_COND_HOPS`] instructions and nothing is spilled.
+    pub reach: bool,
 }
 
 impl Image<'_> {
@@ -189,7 +193,8 @@ impl Image<'_> {
 /// How many instructions a pool word a predicated instruction loaded is also
 /// believed on the path where that instruction did not run. That path does not
 /// hold the word; it is assumed only so a predicated pair (`ldrne; addne`),
-/// which runs under one condition, meets at the `add`.
+/// which runs under one condition, meets at the `add`. With `picpoolreach`
+/// off it bounds every pool word.
 const MAX_COND_HOPS: u8 = 8;
 
 /// How far past an instruction's own address a constant may lie and still be its
@@ -251,6 +256,9 @@ pub(super) struct PicPool {
     /// What the walk had queued at the first pool load: each was queued by an
     /// instruction that carried nothing, so nothing holds there.
     dry: HashSet<u64>,
+    /// `picpoolreach` off: pool words follow fall-through alone, for
+    /// [`MAX_COND_HOPS`] instructions.
+    window: bool,
 }
 
 /// One decoded instruction, as [`PicPool::step`] reads it.
@@ -269,9 +277,11 @@ pub(super) struct Insn<'a> {
 /// How control reaches the next instruction, which decides what it carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Edge {
-    /// The instruction ran: a fall-through, a static branch or a switch case,
-    /// each carrying every value it passes on.
-    Ran,
+    /// The instruction ran and fell through: every value it passes on.
+    Fall,
+    /// A static branch or a switch case: every value it passes on, or only
+    /// the bases with `picpoolreach` off.
+    Branch,
     /// A predicated instruction's condition failed and it did not run: every
     /// value it was handed and its condition did not overwrite.
     Skip,
@@ -306,9 +316,13 @@ impl Fact {
             && self.p.word == o.p.word
     }
 
-    /// One more instruction travelled; `None` once a conditional word expires.
-    fn hop(mut self) -> Option<Fact> {
+    /// One more instruction travelled; `None` once a conditional word, or with
+    /// a `window` any word, expires.
+    fn hop(mut self, window: bool) -> Option<Fact> {
         self.p.age = self.p.age.saturating_add(1);
+        if window && self.p.age > u16::from(MAX_COND_HOPS) {
+            return None;
+        }
         if let Some(c) = self.p.cond {
             let c = c + 1;
             if c > MAX_COND_HOPS {
@@ -343,7 +357,7 @@ impl PicPool {
     /// edge from the entry would, at no cost per instruction before the load.
     ///
     /// A predicated instruction (`if (!cond) goto inst_next` ahead of its body)
-    /// reaches the next instruction along two edges: [`Edge::Ran`] when it ran
+    /// reaches the next instruction along two edges: [`Edge::Fall`] when it ran
     /// and fell through, [`Edge::Skip`] when it did not run. A conditional
     /// write to a base therefore kills it only on the path where it ran, and a
     /// predicated return (`popeq {r4-r6,pc}`) leaves the base to the path that
@@ -354,12 +368,13 @@ impl PicPool {
         if !self.live {
             fresh?;
             self.live = true;
+            self.window = !img.reach;
             self.dry = queued().into_iter().collect();
         }
         let next = vma.wrapping_add(u64::from(len));
         let skip_at = ops.iter().position(|op| op.opcode == OpCode::CPUI_CBRANCH && branches_to(op, next));
         if let Some(next) = fall {
-            self.edges.push((vma, next, Edge::Ran));
+            self.edges.push((vma, next, Edge::Fall));
         }
         if skip_at.is_some() {
             self.edges.push((vma, next, Edge::Skip));
@@ -368,7 +383,7 @@ impl PicPool {
             branch_targets
                 .iter()
                 .filter(|&&to| !(skip_at.is_some() && to == next) && Some(to) != fall)
-                .map(|&to| (vma, to, Edge::Ran)),
+                .map(|&to| (vma, to, Edge::Branch)),
         );
 
         // Hashing every instruction's address would be this walk's whole cost on
@@ -380,7 +395,7 @@ impl PicPool {
         }
         let ev = evaluate(vma, ops, &ins, img);
         let calls = ops.iter().any(|op| matches!(op.opcode, OpCode::CPUI_CALL | OpCode::CPUI_CALLIND));
-        let opaque = ends_words(ops);
+        let opaque = ends_words(ops) || (self.window && leaves_the_run(ops));
         let kept = |f: &Fact| {
             !ev.written.iter().any(|&(off, size)| spans_overlap(f.p.off, f.p.size, off, size))
                 && (!calls || survives_calls(&f.p, img.preserved))
@@ -422,7 +437,8 @@ impl PicPool {
             carry.retain(|(o, _)| !overlaps(&o.p, &p));
             carry.push((Fact { p, base: false }, 0));
         }
-        outs.extend(youngest(carry.into_iter().filter_map(|(f, deps)| f.hop().map(|f| (f, deps)))));
+        let window = self.window;
+        outs.extend(youngest(carry.into_iter().filter_map(|(f, deps)| f.hop(window).map(|f| (f, deps))), window));
 
         // The path where the instruction did not run: what it was handed, less
         // what its condition wrote. Its pool words follow the instruction when
@@ -449,7 +465,7 @@ impl PicPool {
                 skip.extend(outs.iter().filter(|(f, _)| !f.base).copied());
             } else {
                 let words = ins.iter().enumerate().filter(|(_, f)| !f.base && untouched(f));
-                skip.extend(youngest(words.filter_map(|(i, f)| f.hop().map(|f| (f, 1 << i)))));
+                skip.extend(youngest(words.filter_map(|(i, f)| f.hop(window).map(|f| (f, 1 << i))), window));
             }
         }
 
@@ -461,10 +477,17 @@ impl PicPool {
             .map(|(f, _)| *f)
             .collect();
         let skipped: Vec<Fact> = skip.iter().map(|(f, _)| *f).collect();
+        let based: Vec<Fact> = ran.iter().filter(|f| f.base || !window).copied().collect();
         let reach = fall
             .into_iter()
-            .chain(branch_targets.iter().copied().filter(|&to| !(skip_at.is_some() && to == next)))
             .map(|to| (to, &ran))
+            .chain(
+                branch_targets
+                    .iter()
+                    .copied()
+                    .filter(|&to| !(skip_at.is_some() && to == next) && Some(to) != fall)
+                    .map(|to| (to, &based)),
+            )
             .chain(skip_at.map(|_| (next, &skipped)));
         for (to, carry) in reach.collect::<Vec<_>>() {
             self.reach(to, carry);
@@ -492,9 +515,9 @@ impl PicPool {
         if !self.live {
             return;
         }
-        self.edges.extend(targets.iter().map(|&to| (vma, to, Edge::Ran)));
+        self.edges.extend(targets.iter().map(|&to| (vma, to, Edge::Branch)));
         let Some(n) = self.nodes.iter().rev().find(|n| n.vma == vma) else { return };
-        let ran: Vec<Fact> = n.outs.iter().map(|(f, _)| *f).collect();
+        let ran: Vec<Fact> = n.outs.iter().filter(|(f, _)| f.base || !self.window).map(|(f, _)| *f).collect();
         for &to in targets {
             self.reach(to, &ran);
         }
@@ -543,7 +566,9 @@ impl PicPool {
             index.get(&from).is_some_and(|&i| {
                 let n = &self.nodes[i];
                 let carried = if kind == Edge::Skip { &n.skip } else { &n.outs };
-                carried.iter().any(|(o, deps)| deps & !valid[i] == 0 && o.same(f))
+                carried
+                    .iter()
+                    .any(|(o, deps)| deps & !valid[i] == 0 && (o.base || !self.window || kind != Edge::Branch) && o.same(f))
             })
         };
         let mut changed = true;
@@ -650,7 +675,7 @@ fn evaluate(vma: u64, ops: &[FullOp], ins: &[Fact], img: &Image) -> Eval {
         })
         .collect();
     let slots: Vec<(usize, &Fact)> = ins.iter().enumerate().filter(|(_, f)| f.p.slot).collect();
-    let sp = img.sp.filter(|_| got.is_some() && ins.iter().any(|f| f.base));
+    let sp = img.sp.filter(|_| img.reach && got.is_some() && ins.iter().any(|f| f.base));
     if let Some((off, size)) = sp {
         vals.push((Key::Reg(off, size), Known { sp: true, ..Known::default() }));
     }
@@ -805,11 +830,19 @@ fn ends_words(ops: &[FullOp]) -> bool {
     !calls && ops.iter().any(|op| op.opcode == OpCode::CPUI_CALLOTHER)
 }
 
+/// Does control leave the straight-line run here? With `picpoolreach` off a
+/// pool word ends at it.
+fn leaves_the_run(ops: &[FullOp]) -> bool {
+    ops.iter().any(|op| matches!(op.opcode, OpCode::CPUI_BRANCH | OpCode::CPUI_BRANCHIND | OpCode::CPUI_RETURN))
+}
+
 /// The [`MAX_TRACKED`] youngest pool words, ties broken by register and load so
-/// every run keeps the same ones.
-fn youngest(words: impl Iterator<Item = (Fact, u32)>) -> Vec<(Fact, u32)> {
+/// every run keeps the same ones; with a `window`, the first ones handed in.
+fn youngest(words: impl Iterator<Item = (Fact, u32)>, window: bool) -> Vec<(Fact, u32)> {
     let mut words: Vec<(Fact, u32)> = words.collect();
-    words.sort_by_key(|(f, _)| (f.p.age, f.p.off, f.p.origin));
+    if !window {
+        words.sort_by_key(|(f, _)| (f.p.age, f.p.off, f.p.origin));
+    }
     words.truncate(MAX_TRACKED);
     words
 }
@@ -1067,12 +1100,13 @@ mod tests {
         queue: Vec<u64>,
         preserved: &'a [(u64, u64)],
         sp: Option<(u64, u32)>,
+        reach: bool,
         s: &'a Spaces,
     }
 
     impl<'a> Walk<'a> {
         fn new(s: &'a Spaces, pool: &'a PoolImage<'a>, mapped: &'a [(u64, u64)]) -> Self {
-            Walk { pp: PicPool::default(), pool, mapped, exec: &[], got: None, queue: Vec::new(), preserved: &[], sp: Some((SP, 4)), s }
+            Walk { pp: PicPool::default(), pool, mapped, exec: &[], got: None, queue: Vec::new(), preserved: &[], sp: Some((SP, 4)), reach: true, s }
         }
 
         fn step(&mut self, vma: u64, ops: &[FullOp], branches: &[u64]) -> Option<u64> {
@@ -1092,6 +1126,7 @@ mod tests {
                 got: self.got,
                 preserved: self.preserved,
                 sp: self.sp,
+                reach: self.reach,
             };
             self.pp.step(&img, Insn { vma, len, fall, ops, branches }, || self.queue.clone())
         }
@@ -1401,6 +1436,31 @@ mod tests {
             w.step(vma, &add_pc(&s, 0x20, vma), &[]);
             assert_eq!(!w.finish().refs.is_empty(), composes, "cond {cond}, gap {gap}");
         }
+    }
+
+    /// With `picpoolreach` off a word lives [`MAX_COND_HOPS`] instructions along
+    /// fall-through only, and no base is followed through a stack slot.
+    #[test]
+    fn picpoolreach_off_keeps_the_eight_instruction_window() {
+        let (s, pool) = (spaces(), image());
+        for (gap, composes) in [(MAX_COND_HOPS - 1, true), (MAX_COND_HOPS, false)] {
+            let mut w = Walk::new(&s, &pool, &MAPPED);
+            w.reach = false;
+            w.step(0x600, &ldr(&s, 0x20, 0x6a0), &[]);
+            let mut vma = 0x604;
+            for _ in 0..gap {
+                w.step(vma, &other(&s), &[]);
+                vma += 4;
+            }
+            w.step(vma, &add_pc(&s, 0x20, vma), &[]);
+            assert_eq!(!w.finish().refs.is_empty(), composes, "gap {gap}");
+        }
+        let mut w = Walk::new(&s, &pool, &MAPPED);
+        w.reach = false;
+        w.step(0x600, &ldr(&s, 0x20, 0x6a0), &[]);
+        w.step(0x604, &jump(&s, 0x640), &[0x640]);
+        w.step(0x640, &add_pc(&s, 0x20, 0x640), &[]);
+        assert!(w.finish().refs.is_empty(), "no word across a branch");
     }
 
     /// More than [`MAX_TRACKED`] words in flight: the oldest is dropped.

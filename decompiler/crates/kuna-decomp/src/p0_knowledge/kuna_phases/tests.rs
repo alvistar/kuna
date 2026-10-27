@@ -38,13 +38,13 @@ fn surface_count_is_120() {
 }
 
 #[test]
-fn settable_count_is_330() {
-    assert_eq!(kuna_num_settables(), 330);
-    assert_eq!(SETTABLE_TABLE.len(), 330);
+fn settable_count_is_331() {
+    assert_eq!(kuna_num_settables(), 331);
+    assert_eq!(SETTABLE_TABLE.len(), 331);
 }
 
 #[test]
-fn tier_counts_are_120_core_126_transform_84_analysis() {
+fn tier_counts_are_120_core_126_transform_85_analysis() {
     let mut core = 0;
     let mut transform = 0;
     let mut analysis = 0;
@@ -56,7 +56,7 @@ fn tier_counts_are_120_core_126_transform_84_analysis() {
             other => panic!("invalid tier {other:?} on {}", s.option),
         }
     }
-    assert_eq!((core, transform, analysis), (120, 126, 84));
+    assert_eq!((core, transform, analysis), (120, 126, 85));
 }
 
 #[test]
@@ -856,7 +856,8 @@ fn option_values_live_value_present_for_154() {
     // 152 -> 153: +1 for `callwide` (live_field = call_wide).
     // 153 -> 154: +1 for `pairrefine` (live_field = pair_refine).
     // 154 -> 156: +2 for `armpltslot` and `armcondskip` (live_field = analysis_armpltslot, analysis_armcondskip).
-    assert_eq!(with_live, 156);
+    // 156 -> 157: +1 for `picpoolreach` (live_field = analysis_picpoolreach).
+    assert_eq!(with_live, 157);
 }
 
 #[test]
@@ -1057,7 +1058,8 @@ fn emit_catalog_json_static_form_brackets_and_commas() {
     // +1 for `lazyfuncs`; its P1 row sits beside `addrtakenentry`.
     // +1 for `pairrefine`; its P3 row sits beside `splitstorekeep`.
     // +2 for `armpltslot` and `armcondskip`; their P1 rows sit beside `armwalkmode`.
-    assert_eq!(json.matches("},\n").count(), 329);
+    // +1 for `picpoolreach`; its P1 row sits beside `armcondskip`.
+    assert_eq!(json.matches("},\n").count(), 330);
 }
 
 #[test]

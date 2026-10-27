@@ -18,8 +18,14 @@ fn fixture() -> PathBuf {
 }
 
 fn rows(path: &PathBuf, target: u64) -> Vec<(u64, String)> {
-    let (stdout, stderr, code) =
-        common::run_kuna(&["xrefs", path.to_str().unwrap(), "--to", &format!("{target:#x}"), "--json"]);
+    rows_with(path, target, &[])
+}
+
+fn rows_with(path: &PathBuf, target: u64, extra: &[&str]) -> Vec<(u64, String)> {
+    let target = format!("{target:#x}");
+    let mut args = vec!["xrefs", path.to_str().unwrap(), "--to", &target, "--json"];
+    args.extend_from_slice(extra);
+    let (stdout, stderr, code) = common::run_kuna(&args);
     assert_eq!(code, 0, "{stderr}");
     let doc: Value = serde_json::from_str(&stdout).expect("xref JSON");
     let mut rows: Vec<(u64, String)> = doc["xrefs"]
@@ -56,5 +62,19 @@ fn a_got_base_reloaded_from_the_stack_reads_its_slots() {
     assert_eq!(rows(&path, 0x1100c), vec![row(0x1051c, "read")], "pushed and popped");
     assert!(rows(&path, 0x11010).is_empty(), "slot overwritten before the reload");
     assert!(rows(&path, 0x10850).is_empty());
+    std::fs::remove_file(path).unwrap();
+}
+
+/// `picpoolreach off` restores the eight-instruction, fall-through-only window
+/// and follows no stack slot: none of the rows above is filed.
+#[test]
+fn picpoolreach_off_files_none_of_them() {
+    let path = fixture();
+    let off = ["--option", "picpoolreach", "off"];
+    let base = rows_with(&path, 0x11000, &off);
+    assert!(!base.contains(&row(0x10138, "read")), "{base:?}");
+    for target in [0x11004, 0x10820, 0x11008, 0x1100c] {
+        assert!(rows_with(&path, target, &off).is_empty(), "{target:#x}");
+    }
     std::fs::remove_file(path).unwrap();
 }
