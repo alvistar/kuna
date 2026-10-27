@@ -8,7 +8,8 @@ stalecallee/staleblx/rejectedblx/backwardblx/corpusblx/chainprefix/longchainpref
 cycleprefix/cycleanchor (with chainprefix), selfcycleprefix (with staleprefix),
 calledprefix (with cycleprefix or selfcycleprefix), interworkfp,
 mappedcallee/latecallee (with interworkfp), staleisa, stalegap/interiorisa (with staleisa), prefixisa (with stalegap), prefixpool, focusmode, gapmode, splitgapcallee/gapbranch (with gapmode), gapbound (with gapbranch), rootmode (with focusmode), armcallee (with focusmode/gapmode), establishedmode (with focusmode),
-establishedsplit (with establishedmode), prefixmode, backwardframe/splitframe (with focusmode/rootmode), recursiveframe/unclaimedmode/focusblocks/recoveredpublish (with splitframe), xrefpublish (with focusblocks), aifseedmode, staleaif.
+establishedsplit (with establishedmode), prefixmode, backwardframe/splitframe (with focusmode/rootmode), recursiveframe/unclaimedmode/focusblocks/recoveredpublish (with splitframe), xrefpublish (with focusblocks), aifseedmode, staleaif,
+farcaller (with aifcount or aiffingerprint), farsplit (with farcaller).
 The entry calls twenty leaves, stocking AIF's mov/mov fingerprint. Two callers
 have unique frame prologues and no inbound direct call. The first has an early
 return before a later loop; its interior matches the leaves' fingerprint.
@@ -26,7 +27,8 @@ def image(thumb=False, big=False, symbols=False, mixed=False, wide=False, aifpre
           backwardblx=False, chainprefix=False, longchainprefix=False,
           cycleprefix=False, cycleanchor=False, selfcycleprefix=False, corpusblx=False,
           calledprefix=False, interworkfp=False, mappedcallee=False, latecallee=False,
-          staleisa=False, stalegap=False, interiorisa=False, prefixisa=False, prefixpool=False, focusmode=False, gapmode=False, splitgapcallee=False, gapbranch=False, gapbound=False, rootmode=False, armcallee=False, establishedmode=False, establishedsplit=False, prefixmode=False, backwardframe=False, splitframe=False, recursiveframe=False, unclaimedmode=False, focusblocks=False, xrefpublish=False, aifseedmode=False, staleaif=False, recoveredpublish=False):
+          staleisa=False, stalegap=False, interiorisa=False, prefixisa=False, prefixpool=False, focusmode=False, gapmode=False, splitgapcallee=False, gapbranch=False, gapbound=False, rootmode=False, armcallee=False, establishedmode=False, establishedsplit=False, prefixmode=False, backwardframe=False, splitframe=False, recursiveframe=False, unclaimedmode=False, focusblocks=False, xrefpublish=False, aifseedmode=False, staleaif=False, recoveredpublish=False,
+          farcaller=False, farsplit=False):
     order = '>' if big or be8 else '<'
     instruction_order = '<' if be8 else order
     pack = lambda fmt, *values: struct.pack(order + fmt, *values)
@@ -233,6 +235,21 @@ def image(thumb=False, big=False, symbols=False, mixed=False, wide=False, aifpre
         arm_branch(0x155C, 0x1500)
         if aiffingerprint:
             word(0x1560, 0xE8BD0010)
+    if farcaller:
+        assert aifcount or aiffingerprint
+        for at in range(0x1550, 0x1564, 4):
+            word(at, 0xE12FFF1E)
+        word(0x1650, 0xE92D0010 if aiffingerprint else 0xE3A00007)
+        word(0x1654, 0xE1A04000 if aiffingerprint else 0xE3A01000)
+        if aiffingerprint:
+            arm_branch(0x1658, 0x1500)
+            word(0x165C, 0xE8BD0010)
+        else:
+            word(0x1658, 0xE1A02002)
+            arm_branch(0x165C, 0x1500)
+    if farsplit:
+        assert farcaller
+        arm_branch(0x1108, 0x1600, 0xEA000000)  # the gap after 0x1500 ends at 0x1600
     if splitbody:
         arm_branch(BASE + 4, 0x1500)
         arm_branch(0x1500, 0x1750, 0xEA000000)
@@ -662,4 +679,6 @@ if __name__ == '__main__':
                                               'xrefpublish' in sys.argv[2:],
                                               'aifseedmode' in sys.argv[2:],
                                               'staleaif' in sys.argv[2:],
-                                              'recoveredpublish' in sys.argv[2:]))
+                                              'recoveredpublish' in sys.argv[2:],
+                                              'farcaller' in sys.argv[2:],
+                                              'farsplit' in sys.argv[2:]))

@@ -842,6 +842,7 @@ fn descend(
     let mut deferred_focus = if gapwalk && !prologues { std::mem::take(&mut pending_focus) } else { Vec::new() };
     let mut focus_decoded_from: Option<usize> = None;
     let mut focus_bounds: Option<BTreeSet<u64>> = None;
+    let mut gap_probed = false;
     let mut focused: Vec<u64> = Vec::new();
 
     loop {
@@ -1015,7 +1016,8 @@ fn descend(
                             .as_ref(),
                         focus_bounds.take().as_ref(),
                     );
-                    pending_focus.extend(found.into_iter().rev());
+                    gap_probed |= found.is_some();
+                    pending_focus.extend(found.unwrap_or_default().into_iter().rev());
                     continue;
                 }
                 None if !deferred_focus.is_empty() => {
@@ -1025,7 +1027,7 @@ fn descend(
                 }
                 None if focus_decoded_from.is_some_and(|before| partition.len() > before) => {
                     let before = focus_decoded_from.take().unwrap();
-                    focus_bounds = Some(partition[before..].iter()
+                    focus_bounds = gap_probed.then(|| partition[before..].iter()
                         .flat_map(|&(at, len)| [at, at.wrapping_add(u64::from(len))]).collect());
                     gapwalk_done = false;
                     continue;
@@ -1435,7 +1437,8 @@ const AIF_MIN_FUNCTIONS: usize = 20;
 ///
 /// The gap-walk fingerprints each candidate against the prologues of the already
 /// -discovered functions, so only the two leading instructions of each are
-/// rendered here.
+/// rendered here. `None` when a function-count or fingerprint gate stops it
+/// before any gap is probed.
 #[allow(clippy::too_many_arguments)]
 fn gap_entries(
     arch: &Architecture,
@@ -1448,9 +1451,9 @@ fn gap_entries(
     frame: Option<&super::Listing>,
     bracket: Option<&crate::aif::kuna_aifbracket::BracketEvidence>,
     near: Option<&BTreeSet<u64>>,
-) -> Vec<u64> {
+) -> Option<Vec<u64>> {
     if funcs.len() < AIF_MIN_FUNCTIONS || partition.is_empty() {
-        return Vec::new();
+        return None;
     }
     let mut listing = partition_listing(partition, funcs, exec);
     let _probe = crate::aif::arm_gap_probe_scope(translate);
@@ -1458,11 +1461,11 @@ fn gap_entries(
     let poolslide = (arch.analysis_aifpoolslide && crate::loadimage_object::is_arm32_language(&arch.archid))
         .then_some(arch);
     if let Some(prior) = frame {
-        crate::aif::run_aif_after_frames(
+        Some(crate::aif::run_aif_after_frames(
             &listing, prior, translate, Rc::clone(code_space),
             arch.analysis_aifstrict, arch.analysis_aifcorroborate, bracket, arch.analysis_aifnoppad,
             poolslide, None, None,
-        )
+        ))
     } else {
         crate::aif::run_aif_sharing(
             &listing, translate, Rc::clone(code_space), listing.exec_ranges(),

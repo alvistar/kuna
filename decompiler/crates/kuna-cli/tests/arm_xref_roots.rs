@@ -382,6 +382,48 @@ fn aif_uses_the_function_count_and_fingerprints_after_frames_are_walked() {
     }
 }
 
+/// Without frames the second gap pass re-probes only the gaps next to the
+/// focus when the first pass probed. With `farsplit` the caller at 0x1650 is
+/// in a gap the focus 0x1500 does not touch. In the `aifcount` arm the first
+/// pass has nineteen functions and probes nothing, so the second pass probes
+/// every gap and files the row. In the `aiffingerprint` arm the first pass
+/// probed, the caller's fingerprint reaches the threshold only with the focus,
+/// and its far gap is not probed again, so the row is lost; without
+/// `farsplit` the gap touches the focus and the row stays.
+#[test]
+fn the_second_gap_pass_narrows_only_after_a_first_pass_probed() {
+    let cases = [
+        ("aifcount", true, vec![(0x165c, 0x1500, 0x1650)]),
+        ("aiffingerprint", true, vec![]),
+        ("aiffingerprint", false, vec![(0x1658, 0x1500, 0x1650)]),
+    ];
+    for (variant, split, expected) in cases {
+        for endian in ["little", "big"] {
+            let mut options = vec![variant, "farcaller"];
+            if split {
+                options.push("farsplit");
+            }
+            let path = fixture_variant(
+                &format!("far-{variant}-{split}-{endian}"),
+                "arm",
+                endian,
+                false,
+                &options,
+            );
+            let to = query(
+                &path,
+                "--to",
+                "0x1500",
+                "arm",
+                endian,
+                &["--option", "aif", "on", "--option", "funcstart_patterns", "off"],
+            );
+            assert_eq!(calls(&to), expected, "{variant}/{split}/{endian}: {to}");
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+}
+
 #[test]
 fn a_frame_in_a_gap_does_not_take_a_seeded_callers_distant_block() {
     for (endian, language) in [("little", "ARM:LE:32:v8"), ("big", "ARM:BE:32:v8")] {

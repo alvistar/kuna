@@ -871,11 +871,12 @@ pub fn run_aif(
     aifpoolslide: Option<&kuna_decomp::architecture::Architecture>,
 ) -> Vec<u64> {
     run_aif_sharing(listing, translate, code_space, exec_ranges, aifstrict, aifcorroborate, aifbracket,
-        aifnoppad, aifpoolslide, None, None)
+        aifnoppad, aifpoolslide, None, None).unwrap_or_default()
 }
 
 /// [`run_aif`] over decodes shared through `memo`, probing only the gaps that
-/// touch one of the `near` instruction bounds when it is given.
+/// touch one of the `near` instruction bounds when it is given. `None` when it
+/// bails before probing any gap.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_aif_sharing(
     listing: &Listing,
@@ -889,7 +890,7 @@ pub(crate) fn run_aif_sharing(
     aifpoolslide: Option<&kuna_decomp::architecture::Architecture>,
     memo: Option<&Rc<crate::listing::kuna_decodememo::DecodeMemo>>,
     near: Option<&BTreeSet<u64>>,
-) -> Vec<u64> {
+) -> Option<Vec<u64>> {
     let _probe = arm_gap_probe_scope(translate);
     let poolslide = aifpoolslide.map(|arch| (arch, Rc::clone(&code_space)));
     let mut decoder = GapDecoder::new(translate, code_space, exec_ranges);
@@ -926,7 +927,8 @@ pub(crate) fn run_aif_after_frames(
         strict: aifstrict, corroborate: aifcorroborate, bracket: aifbracket, noppad: aifnoppad,
         poolslide, near: None,
     };
-    let entries = aif_candidates(listing, listing, &mut decoder, policy, &BTreeMap::new(), None, None);
+    let entries = aif_candidates(listing, listing, &mut decoder, policy, &BTreeMap::new(), None, None)
+        .unwrap_or_default();
     if let (Some(out), Some(reached)) = (straight_line.as_deref_mut(), decoder.straight_line.take()) {
         out.extend(reached);
     }
@@ -955,7 +957,7 @@ fn run_aif_with_decoder(
         strict: aifstrict, corroborate: aifcorroborate, bracket: aifbracket, noppad: aifnoppad,
         poolslide: None, near: None,
     };
-    aif_candidates(listing, listing, decoder, gap_walk, &BTreeMap::new(), None, None)
+    aif_candidates(listing, listing, decoder, gap_walk, &BTreeMap::new(), None, None).unwrap_or_default()
 }
 
 /// The per-run AIF gap-walk policy flags.
@@ -979,6 +981,7 @@ fn touches(listing: &Listing, near: &BTreeSet<u64>, gap_start: u64, gap_hi: u64)
 
 /// Frame-prefix probes skip claimed spans and gaps containing no frame roots.
 /// Only `listing` establishes code coverage; `corpus` may include provisional callees.
+/// `None` when the function-count or fingerprint gate stops it before any probe.
 fn aif_candidates(
     listing: &Listing,
     corpus: &Listing,
@@ -987,7 +990,7 @@ fn aif_candidates(
     frames: &BTreeMap<u64, u32>,
     roots: Option<&BTreeSet<u64>>,
     mut bodies: Option<&mut BTreeMap<u64, ProbedBody>>,
-) -> Vec<u64> {
+) -> Option<Vec<u64>> {
     let GapWalk { strict: aifstrict, corroborate: aifcorroborate, bracket, noppad, poolslide, near } = policy;
     let bracket = bracket.filter(|_| roots.is_none());
     let mut padding = (noppad && roots.is_none()).then(|| kuna_aifnoppad::PaddingRuns::new(decoder));
@@ -999,12 +1002,12 @@ fn aif_candidates(
         })
     };
     if corpus.function_count() < MINIMUM_FUNCTION_COUNT || corpus.num_instructions() == 0 {
-        return Vec::new();
+        return None;
     }
 
     let hist = build_fingerprint_histogram(corpus, decoder);
     if !hist.values().any(|&c| c >= FINGERPRINT_THRESHOLD) {
-        return Vec::new();
+        return None;
     }
 
     let mut accepted: BTreeSet<u64> = BTreeSet::new();
@@ -1144,7 +1147,7 @@ fn aif_candidates(
         };
     }
 
-    accepted.into_iter().collect()
+    Some(accepted.into_iter().collect())
 }
 
 /// The outcome of one gap-start probe. `Uncorroborated` is `aifcorroborate`'s
@@ -1380,7 +1383,8 @@ fn reconcile_frame_prefixes(
 ) -> BTreeMap<u64, u64> {
     let mut accepted = roots.clone();
     let mut replacements = BTreeMap::new();
-    let prefixes = aif_candidates(listing, corpus, decoder, policy, &claimed, Some(roots), Some(bodies));
+    let prefixes = aif_candidates(listing, corpus, decoder, policy, &claimed, Some(roots), Some(bodies))
+        .unwrap_or_default();
     for prefix in prefixes {
         if !listing.is_undefined(prefix) || roots.contains(&prefix) {
             continue;

@@ -59,7 +59,7 @@ pub(crate) fn run(
             poolslide,
             memo,
             None,
-        )
+        ).unwrap_or_default()
     };
     let mut pool_entries = Vec::new();
     if arch.analysis_poolentry {
