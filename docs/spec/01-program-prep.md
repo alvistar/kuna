@@ -6162,7 +6162,20 @@ there with no relocation (an import's slot holds 0 and names nothing). Only base
 plus a pool word (the GOTOFF form) is an address: base plus an immediate is
 arithmetic on the base and names nothing, and a plain copy of the base files
 nothing but is itself a base, so `mov r5,r4; ldr r3,[r5,r3]` still finds the
-slot. A switch's case bodies are the dispatcher's own code, so each case target
+slot. A function that runs short of callee-saved registers spills the base and
+reloads it later (`str r3,[sp,#4]` … `ldr r2,[sp,#12]`), and `push {r4}` /
+`pop {r4}` around a write of r4 does the same. A base stored through the stack
+pointer is therefore tracked as a stack slot, named by its offset from the stack
+pointer as each instruction finds it: the instruction's own stack pointer enters
+its fold as offset 0, a store or load through it names a slot by its offset, and
+what the pointer holds at the end is how far the instruction moved it, by which
+every slot is re-offset. A load of a slot is a base, so a slot load through the
+reloaded register finds the GOT slot. A store through the stack pointer over the
+slot ends it, and so does a stack pointer the fold cannot follow (`mov sp,r7`);
+a store through any other pointer is assumed not to reach the slot, as Ghidra's
+stack model assumes, and a call does not end it, since a callee does not write
+its caller's frame. A frame pointer is not followed: a base reloaded through
+`[fp,#-k]` is not found. Slots meet at joins like any other value. A switch's case bodies are the dispatcher's own code, so each case target
 receives the bases the dispatch holds. On ARM a Thumb function's slot word, and a
 Thumb function's PC-composed address, carry bit 0; it is stripped when what
 remains is code, so the reference names the function.

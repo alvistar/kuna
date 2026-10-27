@@ -1399,9 +1399,12 @@ block that jumps back into its body, and dispatches through a guarded
 ELF the same way, with `.text`, `.rodata` strings and a `.got` whose slots hold
 the strings' addresses. Each function keeps a pool-loaded value in a register far
 from the instruction that uses it: a GOT base pair 11 instructions apart, a GOT
-offset loaded 25 instructions before its slot load, and a PC pair split by a
-branch. `picpool` (`listing/kuna_picpool.rs`) must carry each until its register
-is written. The CLI test `arm_regvalue.rs` queries the slots and strings.
+offset loaded 25 instructions before its slot load, a PC pair split by a
+branch, a GOT base spilled to `[sp,#4]` and reloaded after a call and a stack
+adjustment, a base pushed and popped around a write, and a spilled base whose
+slot is overwritten before the reload. `picpool` (`listing/kuna_picpool.rs`) must
+carry each until it is written. The CLI test `arm_regvalue.rs` queries the slots
+and strings.
 
 `lifetimes_partial_windows_x64` is an asset-free Windows-ABI ELF for #810.
 It initializes a three-byte RGB object in the home area, then reuses the same

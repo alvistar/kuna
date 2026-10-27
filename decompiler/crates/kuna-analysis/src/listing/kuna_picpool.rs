@@ -75,7 +75,11 @@
 //! Thumb function's word, and a Thumb function's PC-composed address, carry
 //! bit 0, which is stripped when what remains is code. Only base plus a pool
 //! word (GOTOFF) is an address; a plain copy of the base is a base and files
-//! nothing; a switch's cases receive the dispatch's bases.
+//! nothing; a switch's cases receive the dispatch's bases. A base stored
+//! through the stack pointer (`str r4,[sp,#4]`, `push {r4}`) is tracked as a
+//! slot at its offset from the stack pointer, re-offset as the pointer moves,
+//! until a store through the stack pointer overwrites it or the pointer takes
+//! a value the fold cannot follow; a load of the slot is a base again.
 //!
 //! # Joins
 //!
@@ -164,6 +168,9 @@ pub(super) struct Image<'a> {
     pub got: Option<&'a GotImage<'a>>,
     /// The callee-saved register spans, which a value survives a call in.
     pub preserved: &'a [(u64, u64)],
+    /// The stack pointer's register offset and size, which a spilled GOT base
+    /// is found through.
+    pub sp: Option<(u64, u32)>,
 }
 
 impl Image<'_> {
@@ -215,6 +222,9 @@ struct Pending {
     cond: Option<u8>,
     /// The pool load the word came from; 0 for a GOT base.
     origin: u64,
+    /// A GOT base spilled to the stack: `off` is its byte offset from the
+    /// stack pointer as the instruction it reaches finds it.
+    slot: bool,
 }
 
 /// The pool values one function's walk is carrying, keyed by the address of the
@@ -289,7 +299,11 @@ struct Fact {
 
 impl Fact {
     fn same(&self, o: &Fact) -> bool {
-        self.base == o.base && self.p.off == o.p.off && self.p.size == o.p.size && self.p.word == o.p.word
+        self.base == o.base
+            && self.p.slot == o.p.slot
+            && self.p.off == o.p.off
+            && self.p.size == o.p.size
+            && self.p.word == o.p.word
     }
 
     /// One more instruction travelled; `None` once a conditional word expires.
@@ -373,17 +387,26 @@ impl PicPool {
                 && (f.base || !opaque)
         };
 
+        let sp_size = img.sp.map_or(0, |(_, size)| size);
         let mut outs: Vec<(Fact, u32)> = Vec::new();
         for (i, f) in ins.iter().enumerate().filter(|(_, f)| f.base) {
-            if kept(f) {
+            if f.p.slot {
+                outs.extend(ev.moved(i, f, sp_size).map(|f| (f, 1 << i)));
+            } else if kept(f) {
                 outs.push((*f, 1 << i));
             }
         }
         for &(p, deps) in &ev.new_bases {
             let f = Fact { p, base: true };
             if !calls || survives_calls(&p, img.preserved) {
-                outs.retain(|(o, _)| !(o.base && spans_overlap(o.p.off, o.p.size, p.off, p.size)));
+                outs.retain(|(o, _)| !(o.base && !o.p.slot && spans_overlap(o.p.off, o.p.size, p.off, p.size)));
                 outs.push((f, deps));
+            }
+        }
+        for &(p, deps) in &ev.spilled {
+            if let Some(p) = ev.rebase(p, sp_size) {
+                outs.retain(|(o, _)| !(o.p.slot && spans_overlap(o.p.off, o.p.size, p.off, p.size)));
+                outs.push((Fact { p, base: true }, deps));
             }
         }
         let mut carry: Vec<(Fact, u32)> = Vec::new();
@@ -418,7 +441,7 @@ impl PicPool {
             let untouched =
                 |f: &Fact| !cond_writes.iter().any(|&(off, size)| spans_overlap(f.p.off, f.p.size, off, size));
             for (i, f) in ins.iter().enumerate() {
-                if f.base && untouched(f) {
+                if f.base && (f.p.slot || untouched(f)) {
                     skip.push((*f, 1 << i));
                 }
             }
@@ -570,32 +593,79 @@ struct Eval {
     found: Vec<(u64, XrefKind, u32, u64)>,
     written: Vec<(u64, u32)>,
     new_bases: Vec<(Pending, u32)>,
+    /// The handed-in stack slots a store through the stack pointer overwrote.
+    overwritten: Vec<usize>,
+    /// The bases stored through the stack pointer, offset from it as the
+    /// instruction found it.
+    spilled: Vec<(Pending, u32)>,
+    /// How far the stack pointer moved: `None` when the instruction did not
+    /// write it, `Some(None)` when it wrote a value the fold does not know.
+    sp_moved: Option<Option<u64>>,
+}
+
+impl Eval {
+    /// A handed-in stack slot, re-offset from the stack pointer the next
+    /// instruction finds; `None` when it was overwritten or the stack pointer
+    /// was lost.
+    fn moved(&self, i: usize, f: &Fact, sp_size: u32) -> Option<Fact> {
+        if self.overwritten.contains(&i) {
+            return None;
+        }
+        self.rebase(f.p, sp_size).map(|p| Fact { p, base: true })
+    }
+
+    fn rebase(&self, mut p: Pending, sp_size: u32) -> Option<Pending> {
+        match self.sp_moved {
+            None => Some(p),
+            Some(None) => None,
+            Some(Some(d)) => {
+                p.off = p.off.wrapping_sub(d) & mask(sp_size);
+                Some(p)
+            }
+        }
+    }
 }
 
 /// The addresses this instruction forms from the values it was handed, the
 /// registers it writes, and the GOT bases it establishes: a PC-composed value
-/// in `.got`, or a plain copy of a base.
+/// in `.got`, a plain copy of a base, or a base reloaded from its stack slot.
+///
+/// The stack pointer enters as offset 0 from itself, so a store or load through
+/// it names a slot by its offset, and what the pointer holds at the end is how
+/// far the instruction moved it. A store through any other pointer is assumed
+/// not to reach a slot.
 fn evaluate(vma: u64, ops: &[FullOp], ins: &[Fact], img: &Image) -> Eval {
     let (mapped, data, got) = (img.mapped, img.data_space, img.got);
     let mut vals: Vec<(Key, Known)> = ins
         .iter()
         .enumerate()
+        .filter(|(_, f)| !f.p.slot)
         .map(|(i, f)| {
             let k = if f.base {
-                Known { v: f.p.word, seed: false, pc: false, got: true, origin: 0, deps: 1 << i }
+                Known { v: f.p.word, got: true, deps: 1 << i, ..Known::default() }
             } else {
                 Known { deps: 1 << i, ..Known::seed(f.p.word, f.p.origin) }
             };
             (Key::Reg(f.p.off, f.p.size), k)
         })
         .collect();
+    let slots: Vec<(usize, &Fact)> = ins.iter().enumerate().filter(|(_, f)| f.p.slot).collect();
+    let sp = img.sp.filter(|_| got.is_some() && ins.iter().any(|f| f.base));
+    if let Some((off, size)) = sp {
+        vals.push((Key::Reg(off, size), Known { sp: true, ..Known::default() }));
+    }
+    let stack_offset = |k: Known| (k.sp && !k.seed && !k.pc && !k.got).then(|| k.v & mask(sp.map_or(0, |s| s.1)));
     let mut written: Vec<(u64, u32)> = Vec::new();
     let mut found: Vec<(u64, XrefKind, u32, u64)> = Vec::new();
     let mut new_bases: Vec<(Pending, u32)> = Vec::new();
+    let mut overwritten: Vec<usize> = Vec::new();
+    let mut spilled: Vec<(Pending, u32)> = Vec::new();
 
     for op in ops {
+        let mut folded = fold(op, vma, &vals, data);
         if op.opcode == OpCode::CPUI_LOAD {
-            if let (Some(g), Some(addr)) = (got, op.ins.get(1).and_then(|vn| value_of(vn, vma, &vals, data))) {
+            let addr = op.ins.get(1).and_then(|vn| value_of(vn, vma, &vals, data));
+            if let (Some(g), Some(addr)) = (got, addr) {
                 let slot = addr.v & mask(op.ins[1].size);
                 if addr.got && addr.seed && !addr.pc && g.contains(slot) {
                     found.push((slot, XrefKind::Read, addr.deps, addr.origin));
@@ -606,8 +676,37 @@ fn evaluate(vma: u64, ops: &[FullOp], ins: &[Fact], img: &Image) -> Eval {
                     }
                 }
             }
+            if let (Some(at), Some(out)) = (addr.and_then(stack_offset), &op.out) {
+                folded = slots
+                    .iter()
+                    .find(|(i, f)| !overwritten.contains(i) && f.p.off == at && f.p.size == out.size)
+                    .map(|&(i, f)| Known { v: f.p.word, got: true, deps: 1 << i, ..Known::default() })
+                    .or_else(|| {
+                        spilled.iter().rev().find(|(p, _)| p.off == at && p.size == out.size).map(|&(p, deps)| {
+                            Known { v: p.word, got: true, deps, ..Known::default() }
+                        })
+                    });
+            }
         }
-        let folded = fold(op, vma, &vals, data);
+        if op.opcode == OpCode::CPUI_STORE {
+            let at = op.ins.get(1).and_then(|vn| value_of(vn, vma, &vals, data)).and_then(stack_offset);
+            if let (Some(at), Some(value)) = (at, op.ins.get(2)) {
+                let size = value.size;
+                for &(i, f) in &slots {
+                    if spans_overlap(f.p.off, f.p.size, at, size) && !overwritten.contains(&i) {
+                        overwritten.push(i);
+                    }
+                }
+                spilled.retain(|(p, _)| !spans_overlap(p.off, p.size, at, size));
+                if let Some(v) = value_of(value, vma, &vals, data) {
+                    let base = v.got && !v.seed && !v.pc && ins.iter().any(|f| f.base && f.p.word == v.v);
+                    if base && size == img.pool.ptr_width() {
+                        let p = Pending { off: at, size, word: v.v, age: 0, cond: None, origin: 0, slot: true };
+                        spilled.push((p, v.deps));
+                    }
+                }
+            }
+        }
         let Some(out) = &op.out else { continue };
         let key = key_of(out, data);
         if let Some(Key::Reg(off, size)) = key {
@@ -626,12 +725,15 @@ fn evaluate(vma: u64, ops: &[FullOp], ins: &[Fact], img: &Image) -> Eval {
             let made = composed && in_range(mapped, val.v) && got.is_some_and(|g| g.contains(val.v));
             if made || copied {
                 new_bases.retain(|(b, _)| !spans_overlap(b.off, b.size, off, size));
-                new_bases.push((Pending { off, size, word: val.v, age: 0, cond: None, origin: 0 }, val.deps));
+                new_bases.push((Pending { off, size, word: val.v, age: 0, cond: None, origin: 0, slot: false }, val.deps));
             }
         }
         vals.push((key, val));
     }
-    Eval { found, written, new_bases }
+    let sp_moved = sp.filter(|&(off, size)| written.iter().any(|&(o, s)| spans_overlap(o, s, off, size))).map(|(off, size)| {
+        vals.iter().rev().find(|(k, _)| *k == Key::Reg(off, size)).and_then(|&(_, k)| stack_offset(k))
+    });
+    Eval { found, written, new_bases, overwritten, spilled, sp_moved }
 }
 
 /// The pool word this instruction loads into a register.
@@ -677,7 +779,7 @@ fn seed(
             continue;
         }
         let Some(word) = pool.word_at(addr) else { continue };
-        return Some(Pending { off: out.offset, size: out.size, word, age: 0, cond: None, origin: vma });
+        return Some(Pending { off: out.offset, size: out.size, word, age: 0, cond: None, origin: vma, slot: false });
     }
     None
 }
@@ -724,9 +826,11 @@ fn survives_calls(p: &Pending, preserved: &[(u64, u64)]) -> bool {
 /// GOTOFF form): `seed` alone is the pool word used as a number, `pc` alone is
 /// any PC-relative arithmetic, and `got` alone is the base itself or base plus
 /// an immediate, which names nothing.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Known {
     v: u64,
+    /// The stack pointer as the instruction found it contributed to this value.
+    sp: bool,
     /// A pool word contributed to this value.
     seed: bool,
     /// This instruction's own PC contributed to this value.
@@ -741,14 +845,14 @@ struct Known {
 
 impl Known {
     fn seed(v: u64, origin: u64) -> Self {
-        Known { v, seed: true, pc: false, got: false, origin, deps: 0 }
+        Known { v, seed: true, origin, ..Known::default() }
     }
 }
 
 /// The value a varnode holds, as [`fold`] reads its inputs.
 fn value_of(vn: &VarnodeData, vma: u64, vals: &[(Key, Known)], data: Option<&Rc<AddrSpace>>) -> Option<Known> {
     if is_constant(vn) {
-        return Some(Known { v: vn.offset & mask(vn.size), seed: false, pc: is_own_pc(vn.offset, vma), got: false, origin: 0, deps: 0 });
+        return Some(Known { v: vn.offset & mask(vn.size), pc: is_own_pc(vn.offset, vma), ..Known::default() });
     }
     let key = key_of(vn, data)?;
     vals.iter().rev().find(|(k, _)| *k == key).map(|(_, v)| *v)
@@ -793,6 +897,7 @@ fn fold(
             let b = get(1)?;
             Some(Known {
                 v: a.v.wrapping_add(b.v),
+                sp: a.sp != b.sp,
                 seed: a.seed || b.seed,
                 pc: a.pc || b.pc,
                 got: a.got || b.got,
@@ -804,6 +909,7 @@ fn fold(
             let b = get(1)?;
             Some(Known {
                 v: a.v.wrapping_sub(b.v),
+                sp: a.sp && !b.sp,
                 seed: a.seed || b.seed,
                 pc: a.pc || b.pc,
                 got: a.got || b.got,
@@ -960,12 +1066,13 @@ mod tests {
         /// What the walk has queued, as `step` snapshots it at the first load.
         queue: Vec<u64>,
         preserved: &'a [(u64, u64)],
+        sp: Option<(u64, u32)>,
         s: &'a Spaces,
     }
 
     impl<'a> Walk<'a> {
         fn new(s: &'a Spaces, pool: &'a PoolImage<'a>, mapped: &'a [(u64, u64)]) -> Self {
-            Walk { pp: PicPool::default(), pool, mapped, exec: &[], got: None, queue: Vec::new(), preserved: &[], s }
+            Walk { pp: PicPool::default(), pool, mapped, exec: &[], got: None, queue: Vec::new(), preserved: &[], sp: Some((SP, 4)), s }
         }
 
         fn step(&mut self, vma: u64, ops: &[FullOp], branches: &[u64]) -> Option<u64> {
@@ -984,6 +1091,7 @@ mod tests {
                 data_space: Some(&self.s.ram),
                 got: self.got,
                 preserved: self.preserved,
+                sp: self.sp,
             };
             self.pp.step(&img, Insn { vma, len, fall, ops, branches }, || self.queue.clone())
         }
@@ -1331,6 +1439,7 @@ mod tests {
     const R4: u64 = 0x30;
     const R5: u64 = 0x34;
     const R2: u64 = 0x28;
+    const SP: u64 = 0x54;
 
     fn got_pool() -> PoolImage<'static> {
         PoolImage::from_ranges(vec![(0x6a0, 0x6a8, &GOT_POOL[..])], 4, true).unwrap()
@@ -1675,6 +1784,123 @@ mod tests {
         w.step(0x604, &add_pc(&s, R4, 0x604), &[]);
         w.step(0x608, &slot_load(&s), &[]);
         assert_eq!(slot_refs(&w.finish(), 0x608), SLOT_REFS.to_vec());
+    }
+
+    /// `str reg,[sp,#k]`.
+    fn spill(s: &Spaces, reg: u64, k: u64) -> Vec<FullOp> {
+        vec![
+            op(OpCode::CPUI_INT_ADD, Some(vn(&s.uniq, 0x2f00, 4)), vec![vn(&s.reg, SP, 4), vn(&s.konst, k, 4)]),
+            op(OpCode::CPUI_STORE, None, vec![vn(&s.konst, ram_id(s), 8), vn(&s.uniq, 0x2f00, 4), vn(&s.reg, reg, 4)]),
+        ]
+    }
+
+    /// `ldr reg,[sp,#k]`.
+    fn reload(s: &Spaces, reg: u64, k: u64) -> Vec<FullOp> {
+        vec![
+            op(OpCode::CPUI_INT_ADD, Some(vn(&s.uniq, 0x2f00, 4)), vec![vn(&s.reg, SP, 4), vn(&s.konst, k, 4)]),
+            op(OpCode::CPUI_LOAD, Some(vn(&s.reg, reg, 4)), vec![vn(&s.konst, ram_id(s), 8), vn(&s.uniq, 0x2f00, 4)]),
+        ]
+    }
+
+    /// `sub sp,sp,#n`.
+    fn grow(s: &Spaces, n: u64) -> Vec<FullOp> {
+        vec![op(OpCode::CPUI_INT_SUB, Some(vn(&s.reg, SP, 4)), vec![vn(&s.reg, SP, 4), vn(&s.konst, n, 4)])]
+    }
+
+    /// `mov r4,#0`.
+    fn clobber_r4(s: &Spaces) -> Vec<FullOp> {
+        vec![op(OpCode::CPUI_COPY, Some(vn(&s.reg, R4, 4)), vec![vn(&s.konst, 0, 4)])]
+    }
+
+    /// `ldr r2,[pc,#..]; ldr r2,[r5,r2]` after the base is made in r4 and
+    /// spilled; `between` runs after the spill.
+    fn spilled_walk(s: &Spaces, between: &[Vec<FullOp>], k: u64) -> Verdict {
+        let (pool, got) = (got_pool(), got_image());
+        let mut w = Walk::new(s, &pool, &GOT_MAP);
+        w.got = Some(&got);
+        w.step(0x600, &ldr(s, R4, 0x6a0), &[]);
+        w.step(0x604, &add_pc(s, R4, 0x604), &[]);
+        w.step(0x608, &spill(s, R4, 4), &[]);
+        w.step(0x60c, &clobber_r4(s), &[]);
+        let mut vma = 0x610;
+        for ops in between {
+            w.step(vma, ops, &[]);
+            vma += 4;
+        }
+        w.step(vma, &reload(s, R5, k), &[]);
+        w.step(vma + 4, &ldr(s, R2, 0x6a4), &[]);
+        let through_r5 = vec![
+            op(OpCode::CPUI_INT_ADD, Some(vn(&s.uniq, 0x2f00, 4)), vec![vn(&s.reg, R5, 4), vn(&s.reg, R2, 4)]),
+            op(OpCode::CPUI_LOAD, Some(vn(&s.reg, R2, 4)), vec![vn(&s.konst, ram_id(s), 8), vn(&s.uniq, 0x2f00, 4)]),
+        ];
+        w.step(vma + 8, &through_r5, &[]);
+        let v = w.finish();
+        let at = vma + 8;
+        Verdict { refs: v.refs.into_iter().filter(|r| r.0 == at).collect(), displaced: v.displaced }
+    }
+
+    /// A GOT base spilled to the stack and reloaded into another register is
+    /// a base there, also after the stack pointer moved in between.
+    #[test]
+    fn a_base_reloaded_from_its_stack_slot_is_a_base() {
+        let s = spaces();
+        let slot = |v: Verdict| v.refs.iter().map(|r| (r.1, r.2)).collect::<Vec<_>>();
+        assert_eq!(slot(spilled_walk(&s, &[], 4)), SLOT_REFS.to_vec());
+        assert_eq!(slot(spilled_walk(&s, &[grow(&s, 8)], 12)), SLOT_REFS.to_vec());
+        assert!(slot(spilled_walk(&s, &[grow(&s, 8)], 4)).is_empty(), "the old offset is another slot now");
+    }
+
+    /// A store through the stack pointer over the slot ends it, and so does a
+    /// stack pointer the fold cannot follow.
+    #[test]
+    fn an_overwritten_slot_or_a_lost_stack_pointer_ends_the_spilled_base() {
+        let s = spaces();
+        let over = spill(&s, 0x20, 4);
+        let lost = vec![op(OpCode::CPUI_COPY, Some(vn(&s.reg, SP, 4)), vec![vn(&s.reg, 0x4c, 4)])];
+        assert!(spilled_walk(&s, &[over], 4).refs.is_empty());
+        assert!(spilled_walk(&s, &[lost], 4).refs.is_empty());
+    }
+
+    /// `push {r4}` and `pop {r4}` around a write of r4 give the base back.
+    #[test]
+    fn a_base_pushed_and_popped_survives_the_write_between() {
+        let (s, pool, got) = (spaces(), got_pool(), got_image());
+        let push = vec![
+            op(OpCode::CPUI_INT_SUB, Some(vn(&s.reg, SP, 4)), vec![vn(&s.reg, SP, 4), vn(&s.konst, 4, 4)]),
+            op(OpCode::CPUI_STORE, None, vec![vn(&s.konst, ram_id(&s), 8), vn(&s.reg, SP, 4), vn(&s.reg, R4, 4)]),
+        ];
+        let pop = vec![
+            op(OpCode::CPUI_LOAD, Some(vn(&s.reg, R4, 4)), vec![vn(&s.konst, ram_id(&s), 8), vn(&s.reg, SP, 4)]),
+            op(OpCode::CPUI_INT_ADD, Some(vn(&s.reg, SP, 4)), vec![vn(&s.reg, SP, 4), vn(&s.konst, 4, 4)]),
+        ];
+        let mut w = Walk::new(&s, &pool, &GOT_MAP);
+        w.got = Some(&got);
+        w.step(0x600, &ldr(&s, R4, 0x6a0), &[]);
+        w.step(0x604, &add_pc(&s, R4, 0x604), &[]);
+        w.step(0x608, &push, &[]);
+        w.step(0x60c, &clobber_r4(&s), &[]);
+        w.step(0x610, &pop, &[]);
+        w.step(0x614, &ldr(&s, R2, 0x6a4), &[]);
+        w.step(0x618, &slot_load(&s), &[]);
+        assert_eq!(slot_refs(&w.finish(), 0x618), SLOT_REFS.to_vec());
+    }
+
+    /// A slot one path overwrites is not believed at the join.
+    #[test]
+    fn a_slot_one_path_overwrites_is_not_believed_at_the_join() {
+        let (s, pool, got) = (spaces(), got_pool(), got_image());
+        let mut w = Walk::new(&s, &pool, &GOT_MAP);
+        w.got = Some(&got);
+        w.step(0x600, &ldr(&s, R4, 0x6a0), &[]);
+        w.step(0x604, &add_pc(&s, R4, 0x604), &[]);
+        w.step(0x608, &spill(&s, R4, 4), &[]);
+        w.step(0x60c, &cbranch(&s, 0x640), &[0x640]);
+        w.step(0x640, &reload(&s, R4, 4), &[]);
+        w.step(0x610, &spill(&s, 0x20, 4), &[]);
+        w.step(0x614, &jump(&s, 0x640), &[0x640]);
+        w.step(0x644, &ldr(&s, R2, 0x6a4), &[]);
+        w.step(0x648, &slot_load(&s), &[]);
+        assert!(slot_refs(&w.finish(), 0x648).is_empty());
     }
 
     /// The walk decodes the entry before any edge into it, so a branch back to

@@ -778,6 +778,7 @@ fn descend(
         data_space: data_space.as_ref(),
         got: got.as_ref(),
         preserved: &preserved,
+        sp: arch.manage().get_stack_space().and_then(|s| s.get_spacebase(0).ok()).map(|b| (b.offset, b.size)),
     });
     // (kuna) `switchtable`: the dispatches whose read stopped for want of a
     // decoded instruction ending at the key, as `(dispatch, mode, branch)`.

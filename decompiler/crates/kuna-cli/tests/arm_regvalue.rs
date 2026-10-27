@@ -47,3 +47,14 @@ fn a_pool_word_far_from_or_branched_to_its_use_still_forms_the_address() {
     assert_eq!(rows(&path, 0x10820), vec![row(0x10324, "data")], "word carried across a branch");
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn a_got_base_reloaded_from_the_stack_reads_its_slots() {
+    let path = fixture();
+    assert_eq!(rows(&path, 0x11008), vec![row(0x10420, "read")], "spilled, sp moved, reloaded");
+    assert_eq!(rows(&path, 0x10830), vec![row(0x10420, "data")], "the slot's word");
+    assert_eq!(rows(&path, 0x1100c), vec![row(0x1051c, "read")], "pushed and popped");
+    assert!(rows(&path, 0x11010).is_empty(), "slot overwritten before the reload");
+    assert!(rows(&path, 0x10850).is_empty());
+    std::fs::remove_file(path).unwrap();
+}
