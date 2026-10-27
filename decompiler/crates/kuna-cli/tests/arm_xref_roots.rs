@@ -338,10 +338,6 @@ fn aif_uses_the_function_count_and_fingerprints_after_frames_are_walked() {
                 &[variant],
             );
             for patterns in ["off", "on"] {
-                // Without patterns no frame is walked: only the queried 0x1500 could add the fourth fingerprint.
-                if variant == "aiffingerprint" && patterns == "off" {
-                    continue;
-                }
                 let to = query(
                     &path,
                     "--to",
@@ -357,9 +353,15 @@ fn aif_uses_the_function_count_and_fingerprints_after_frames_are_walked() {
                         patterns,
                     ],
                 );
+                // Known limit: with no frame walked, the gap walk enters this caller mid-body.
+                let owner = if variant == "aiffingerprint" && patterns == "off" {
+                    0x1554
+                } else {
+                    0x1550
+                };
                 assert_eq!(
                     calls(&to),
-                    vec![(0x155c, 0x1500, 0x1550)],
+                    vec![(0x155c, 0x1500, owner)],
                     "{variant}/{patterns}: {to}"
                 );
             }
