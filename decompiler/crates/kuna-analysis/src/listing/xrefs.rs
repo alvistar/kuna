@@ -641,12 +641,16 @@ pub fn build_measured(
 /// never re-attribute an instruction some other entry already owns. An address
 /// that does not decode is dropped rather than recorded as a function.
 ///
-/// Without frame recovery (`armframes on` with `funcstart_patterns`) a focus address also waits for
-/// the speculative gap walk (`aif`). Walked first, a focus address inside a
-/// function only the gap walk finds decodes part of that body, the gap walk then
-/// refuses the function as a fragment of decoded code (`aifbracket`), and the
-/// query answers without it. Code the focus walk decodes is corpus the gap walk
-/// did not see, so the gap walk runs once more after it.
+/// With `aif` on and no frame recovery (`gapwalk && !prologues`: any architecture
+/// but ARM, and ARM unless both `funcstart_patterns` and `armframes on`), a focus
+/// address also waits for the speculative gap walk. Walked first, a focus address
+/// inside a function only the gap walk finds decodes part of that body, the gap
+/// walk then refuses the function as a fragment of decoded code (`aifbracket`),
+/// and the query answers without it. If the focus walk decodes new code, the gap
+/// walk runs once more over only the gaps next to that code.
+///
+/// Callers: `kuna xrefs` and the inspector's `function_xrefs` (kuna-console,
+/// served by kuna-wasm).
 pub fn build_with_focus(
     file: &object::File,
     arch: &Architecture,

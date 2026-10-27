@@ -5797,7 +5797,7 @@ tracked registers, and cache write settings, including across nested scopes
 (`decompiler/crates/kuna-sleigh/src/kuna_contextscope.rs`).
 Prefix reconciliation compares roots with complete instruction spans, including
 roots inside Thumb-2 instructions rather than only at their starts.
-The ordinary AIF gap pass runs after the
+With frame recovery, the ordinary AIF gap pass runs after the
 recovered roots and explicit focus have been walked: their function count and
 fingerprints can cross acceptance thresholds that the initial partition did not.
 Mode changes from recovered calls remain confined to decoded instruction spans,
@@ -5972,23 +5972,34 @@ coverage, never re-attribute an instruction another entry owns. An address that 
 not decode is dropped rather than recorded as a function, so a byte in the middle of
 a string does not become `sub_<addr>`.
 
-(kuna) Without frame recovery (`armframes` at its `inventory` default, or
-`funcstart_patterns` off), the explicit focus also waits for the speculative gap
-walk, and the gap walk runs once more if the focus decoded anything new
-(`decompiler/crates/kuna-analysis/src/listing/xrefs.rs (build_with_focus)`). Walked
-before the gap walk, a focus address inside a function that only the gap walk finds
-decodes part of that body as a function of its own. The gap walk then sees the
-candidate's flow rejoin decoded code in the same entry interval and, when a literal
-pool before the candidate gives no boundary evidence, refuses it as a fragment
-(`aifbracket`). The query then answered without that function: a `--to` an address
-in it lost the branch into it, and every table its body dispatches lost its
-dispatch-to-slot rows. With the gap walk first, a query answers for such a function
-as the plain walk does, and a focus address still adds the code that nothing else
-reaches. One consequence is intended: a query on the slot after a guarded A32
+(kuna) Without frame recovery, the explicit focus also waits for the speculative gap
+walk (`decompiler/crates/kuna-analysis/src/listing/xrefs.rs (build_with_focus)`).
+Frame recovery needs an ARM image with `funcstart_patterns` and `armframes on`, so the
+deferral applies on every architecture whenever `aif` is on, and on ARM whenever
+`armframes` is at its `inventory` default or `funcstart_patterns` is off. Two callers
+pass a focus: `kuna xrefs`, and the inspector's per-function references
+(`decompiler/crates/kuna-console/src/inspect.rs (function_xrefs)`, which the browser
+front-end serves). Walked before the gap walk, a focus address inside a function that
+only the gap walk finds decodes part of that body as a function of its own. The gap
+walk then sees the candidate's flow rejoin decoded code in the same entry interval
+and, when a literal pool before the candidate gives no boundary evidence, refuses it
+as a fragment (`aifbracket`). The query then answered without that function: a `--to`
+an address in it lost the branch into it, and every table its body dispatches lost
+its dispatch-to-slot rows. With the gap walk first, a query answers for such a
+function as the plain walk does, and a focus address still adds the code that nothing
+else reaches. One consequence is intended: a query on the slot after a guarded A32
 dispatch no longer makes that slot an entry, so the dispatch's predicated skip files
-no `Jump` there, which matches the walk without a focus. The second gap pass keeps
-the focus's own function count and fingerprint as corpus. Frame recovery keeps the
-address-order merge above, unchanged.
+no `Jump` there, which matches the walk without a focus.
+
+If the focus walk decoded new code, the gap walk runs once more, over only the gaps
+that open or close on an instruction the focus decoded. The focus's functions count
+toward that pass's function threshold and fingerprints, so a gap function next to a
+focus that the first pass could not accept (too few functions) is found and its
+references are filed. The second pass cannot move an entry the first pass already
+accepted: when the first pass entered a function mid-body, the focus on the true
+start does not repair it, and a reference from that body keeps the mid-body owner.
+A gap away from the focus code is not probed again, so it does not gain from the
+focus's fingerprint. Frame recovery keeps the address-order merge above, unchanged.
 
 (kuna) Both of those rules read a reference out of *one instruction's* p-code,
 which is the whole answer on x86-64 and no answer at all in 32-bit
