@@ -326,6 +326,9 @@ fn aif_supported_prefix_remains_the_caller_in_both_query_directions() {
     }
 }
 
+/// Without `funcstart_patterns` no frame is walked: the queried 0x1500 is walked
+/// after the gap walk, so the `aifcount` arm's twentieth function, and its row,
+/// come only from the gap walk's second pass.
 #[test]
 fn aif_uses_the_function_count_and_fingerprints_after_frames_are_walked() {
     for variant in ["aifcount", "aiffingerprint"] {
