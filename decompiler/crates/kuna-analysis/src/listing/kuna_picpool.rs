@@ -41,8 +41,9 @@
 //!  * whatever the word itself looks like: in an image mapped low (a non-PIE
 //!    ARM executable at 0x10000) a displacement often lands in a mapped section
 //!    by chance, and only the PC fold below decides that it is one;
-//!  * a later instruction in the same straight-line run folds it, through
-//!    `COPY`/`INT_ADD`/`INT_SUB` alone, together with a constant this
+//!  * a later instruction the word reaches before its register is written
+//!    folds it, through `COPY`/`INT_ADD`/`INT_SUB` alone, together with a
+//!    constant this
 //!    instruction materialized from its **own address** (SLEIGH spells a PC read
 //!    that way: `inst_start + 8` on A32, `+ 4` on Thumb, the fall-through on
 //!    x86);
@@ -83,8 +84,9 @@
 //! carried into it from a back edge. The walk cannot apply that rule as it goes,
 //! since it decodes a join before it has seen every edge into it, so
 //! [`PicPool::finish`] applies it to the recorded body and answers only what
-//! survives. A predicated instruction's skip is an edge of its own
-//! (`Edge::Skip`). Nothing is recorded before the body's first pool load;
+//! survives. A pool word travels the same edges as a base, so an offset loaded
+//! far from its slot load, or ahead of a branch to it, still reaches it. A
+//! predicated instruction's skip is an edge of its own (`Edge::Skip`). Nothing is recorded before the body's first pool load;
 //! what the walk had queued by then holds nothing (`dry`), as does an
 //! instruction another body's walk refused to enter.
 
@@ -177,22 +179,21 @@ impl Image<'_> {
     }
 }
 
-/// How many instructions a pool value may travel before the `add` that composes
-/// it. GCC and Clang emit the pair adjacent (the displacement is measured from
-/// the `add`'s own label, so the two are one template), but instruction
-/// scheduling separates them when several references are formed at once. Bounded
-/// because every hop is one more instruction over which the tracked register is
-/// believed.
-const MAX_HOPS: u8 = 8;
+/// How many instructions a pool word a predicated instruction loaded is also
+/// believed on the path where that instruction did not run. That path does not
+/// hold the word; it is assumed only so a predicated pair (`ldrne; addne`),
+/// which runs under one condition, meets at the `add`.
+const MAX_COND_HOPS: u8 = 8;
 
 /// How far past an instruction's own address a constant may lie and still be its
 /// materialized PC. A32 reads `pc` as `inst_start + 8`, Thumb as `+ 4`, x86 `rip`
 /// as the fall-through; nothing needs more slack than that.
 const PC_WINDOW: u64 = 16;
 
-/// How many pool values may be tracked into one instruction. A join point can be
-/// reached from several predecessors, each carrying its own; the cap keeps that
-/// from accumulating on a pathological CFG.
+/// How many pool words, and separately how many bases, may be tracked into one
+/// instruction. A word lives until its register is written, so this, not a hop
+/// count, bounds the cost: each recorded instruction carries at most this many
+/// of each, and the oldest words are dropped first.
 const MAX_TRACKED: usize = 8;
 
 /// A pool word in flight: the register holding it, its value, and how far it has
@@ -206,7 +207,12 @@ struct Pending {
     /// add masked to the register width, so a negative displacement needs no
     /// separate sign extension.
     word: u64,
-    hops: u8,
+    /// Instructions since the load, saturating; the oldest word is dropped
+    /// first when more than [`MAX_TRACKED`] are in flight.
+    age: u16,
+    /// Hops since a predicated instruction loaded the word, which then expires
+    /// after [`MAX_COND_HOPS`].
+    cond: Option<u8>,
     /// The pool load the word came from; 0 for a GOT base.
     origin: u64,
 }
@@ -226,10 +232,7 @@ struct Pending {
 /// predecessor delivers the same one (a meet), before it answers any address.
 #[derive(Default)]
 pub(super) struct PicPool {
-    at: HashMap<u64, Vec<Pending>>,
-    /// GOT bases, keyed by the instruction they reach like `at`, but carried
-    /// along every edge with no hop bound.
-    bases_at: HashMap<u64, Vec<Pending>>,
+    at: HashMap<u64, Vec<Fact>>,
     nodes: Vec<Node>,
     /// `(from, to, kind)`.
     edges: Vec<(u64, u64, Edge)>,
@@ -256,10 +259,9 @@ pub(super) struct Insn<'a> {
 /// How control reaches the next instruction, which decides what it carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Edge {
-    /// The instruction ran and fell through: every value it passes on.
-    Fall,
-    /// A static branch or a switch case: only GOT bases.
-    Branch,
+    /// The instruction ran: a fall-through, a static branch or a switch case,
+    /// each carrying every value it passes on.
+    Ran,
     /// A predicated instruction's condition failed and it did not run: every
     /// value it was handed and its condition did not overwrite.
     Skip,
@@ -277,8 +279,8 @@ struct Node {
     refs: Vec<(u64, XrefKind, u32, u64)>,
 }
 
-/// A tracked value. A GOT base travels every edge; a pool word only the
-/// fall-through one.
+/// A tracked value: a GOT base or a pool word, each carried along every edge
+/// until its register is written.
 #[derive(Debug, Clone, Copy)]
 struct Fact {
     p: Pending,
@@ -288,6 +290,19 @@ struct Fact {
 impl Fact {
     fn same(&self, o: &Fact) -> bool {
         self.base == o.base && self.p.off == o.p.off && self.p.size == o.p.size && self.p.word == o.p.word
+    }
+
+    /// One more instruction travelled; `None` once a conditional word expires.
+    fn hop(mut self) -> Option<Fact> {
+        self.p.age = self.p.age.saturating_add(1);
+        if let Some(c) = self.p.cond {
+            let c = c + 1;
+            if c > MAX_COND_HOPS {
+                return None;
+            }
+            self.p.cond = Some(c);
+        }
+        Some(self)
     }
 }
 
@@ -314,7 +329,7 @@ impl PicPool {
     /// edge from the entry would, at no cost per instruction before the load.
     ///
     /// A predicated instruction (`if (!cond) goto inst_next` ahead of its body)
-    /// reaches the next instruction along two edges: [`Edge::Fall`] when it ran
+    /// reaches the next instruction along two edges: [`Edge::Ran`] when it ran
     /// and fell through, [`Edge::Skip`] when it did not run. A conditional
     /// write to a base therefore kills it only on the path where it ran, and a
     /// predicated return (`popeq {r4-r6,pc}`) leaves the base to the path that
@@ -330,7 +345,7 @@ impl PicPool {
         let next = vma.wrapping_add(u64::from(len));
         let skip_at = ops.iter().position(|op| op.opcode == OpCode::CPUI_CBRANCH && branches_to(op, next));
         if let Some(next) = fall {
-            self.edges.push((vma, next, Edge::Fall));
+            self.edges.push((vma, next, Edge::Ran));
         }
         if skip_at.is_some() {
             self.edges.push((vma, next, Edge::Skip));
@@ -339,29 +354,23 @@ impl PicPool {
             branch_targets
                 .iter()
                 .filter(|&&to| !(skip_at.is_some() && to == next) && Some(to) != fall)
-                .map(|&to| (vma, to, Edge::Branch)),
+                .map(|&to| (vma, to, Edge::Ran)),
         );
 
         // Hashing every instruction's address would be this walk's whole cost on
         // an architecture that never forms one of these pairs; nothing is in
         // flight until a pool load puts it there.
-        let pending =
-            if self.at.is_empty() { Vec::new() } else { self.at.remove(&vma).unwrap_or_default() };
-        let bases =
-            if self.bases_at.is_empty() { Vec::new() } else { self.bases_at.remove(&vma).unwrap_or_default() };
-        if pending.is_empty() && bases.is_empty() && fresh.is_none() {
+        let ins = if self.at.is_empty() { Vec::new() } else { self.at.remove(&vma).unwrap_or_default() };
+        if ins.is_empty() && fresh.is_none() {
             return None;
         }
-        let ins: Vec<Fact> = bases
-            .iter()
-            .map(|&p| Fact { p, base: true })
-            .chain(pending.iter().map(|&p| Fact { p, base: false }))
-            .collect();
         let ev = evaluate(vma, ops, &ins, img);
         let calls = ops.iter().any(|op| matches!(op.opcode, OpCode::CPUI_CALL | OpCode::CPUI_CALLIND));
+        let opaque = ends_words(ops);
         let kept = |f: &Fact| {
             !ev.written.iter().any(|&(off, size)| spans_overlap(f.p.off, f.p.size, off, size))
                 && (!calls || survives_calls(&f.p, img.preserved))
+                && (f.base || !opaque)
         };
 
         let mut outs: Vec<(Fact, u32)> = Vec::new();
@@ -377,29 +386,26 @@ impl PicPool {
                 outs.push((f, deps));
             }
         }
-        if !leaves_the_run(ops) {
-            let mut carry: Vec<(Fact, u32)> = Vec::new();
-            for (i, f) in ins.iter().enumerate().filter(|(_, f)| !f.base) {
-                if kept(f) {
-                    carry.push((*f, 1 << i));
-                }
-            }
-            if let Some(p) = fresh.filter(|p| !calls || survives_calls(p, img.preserved)) {
-                carry.retain(|(o, _)| !overlaps(&o.p, &p));
-                carry.push((Fact { p, base: false }, 0));
-            }
-            for (mut f, deps) in carry {
-                f.p.hops += 1;
-                if f.p.hops <= MAX_HOPS && outs.iter().filter(|(o, _)| !o.base).count() < MAX_TRACKED {
-                    outs.push((f, deps));
-                }
+        let mut carry: Vec<(Fact, u32)> = Vec::new();
+        for (i, f) in ins.iter().enumerate().filter(|(_, f)| !f.base) {
+            if kept(f) {
+                carry.push((*f, 1 << i));
             }
         }
+        if let Some(mut p) = fresh.filter(|p| !opaque && (!calls || survives_calls(p, img.preserved))) {
+            if skip_at.is_some() && fall.is_some() {
+                p.cond = Some(0);
+            }
+            carry.retain(|(o, _)| !overlaps(&o.p, &p));
+            carry.push((Fact { p, base: false }, 0));
+        }
+        outs.extend(youngest(carry.into_iter().filter_map(|(f, deps)| f.hop().map(|f| (f, deps)))));
 
         // The path where the instruction did not run: what it was handed, less
         // what its condition wrote. Its pool words follow the instruction when
         // that falls through, since a predicated pair (`ldrne; addne`) runs
-        // under one condition; only a base meets both paths.
+        // under one condition; a word it loaded is assumed on this path for
+        // only [`MAX_COND_HOPS`] instructions.
         let mut skip: Vec<(Fact, u32)> = Vec::new();
         if let Some(k) = skip_at {
             let cond_writes: Vec<(u64, u32)> = ops[..k]
@@ -414,34 +420,28 @@ impl PicPool {
             for (i, f) in ins.iter().enumerate() {
                 if f.base && untouched(f) {
                     skip.push((*f, 1 << i));
-                } else if !f.base && fall.is_none() && untouched(f) && f.p.hops < MAX_HOPS {
-                    let mut f = *f;
-                    f.p.hops += 1;
-                    skip.push((f, 1 << i));
                 }
             }
             if fall.is_some() {
                 skip.extend(outs.iter().filter(|(f, _)| !f.base).copied());
+            } else {
+                let words = ins.iter().enumerate().filter(|(_, f)| !f.base && untouched(f));
+                skip.extend(youngest(words.filter_map(|(i, f)| f.hop().map(|f| (f, 1 << i)))));
             }
         }
 
-        let carried: Vec<Pending> = outs.iter().filter(|(f, _)| !f.base).map(|(f, _)| f.p).collect();
-        if let Some(next) = fall.filter(|_| !carried.is_empty()) {
-            self.at.entry(next).or_default().extend(carried);
-        }
-        if fall.is_none() {
-            let carried: Vec<Pending> = skip.iter().filter(|(f, _)| !f.base).map(|(f, _)| f.p).collect();
-            if !carried.is_empty() {
-                self.at.entry(next).or_default().extend(carried);
-            }
-        }
-        let based: Vec<Pending> =
-            outs.iter().filter(|(f, _)| f.base).map(|(f, _)| f.p).take(MAX_TRACKED).collect();
-        let skipped: Vec<Pending> = skip.iter().filter(|(f, _)| f.base).map(|(f, _)| f.p).collect();
+        let ran: Vec<Fact> = outs
+            .iter()
+            .filter(|(f, _)| f.base)
+            .take(MAX_TRACKED)
+            .chain(outs.iter().filter(|(f, _)| !f.base))
+            .map(|(f, _)| *f)
+            .collect();
+        let skipped: Vec<Fact> = skip.iter().map(|(f, _)| *f).collect();
         let reach = fall
             .into_iter()
             .chain(branch_targets.iter().copied().filter(|&to| !(skip_at.is_some() && to == next)))
-            .map(|to| (to, &based))
+            .map(|to| (to, &ran))
             .chain(skip_at.map(|_| (next, &skipped)));
         for (to, carry) in reach.collect::<Vec<_>>() {
             self.reach(to, carry);
@@ -459,8 +459,8 @@ impl PicPool {
     }
 
     /// Record the case edges of a switch dispatch at `vma`, which the walk reads
-    /// after the dispatch's own [`PicPool::step`], and hand each case the GOT
-    /// bases the dispatch passes on: a case body is the dispatcher's own code.
+    /// after the dispatch's own [`PicPool::step`], and hand each case the values
+    /// the dispatch passes on: a case body is the dispatcher's own code.
     /// Recorded whether or not the dispatch carried anything: a case target may
     /// still be reached with a value along another edge, and a dispatch that
     /// carried nothing must veto it there. Before the first pool load the walk
@@ -469,25 +469,26 @@ impl PicPool {
         if !self.live {
             return;
         }
-        self.edges.extend(targets.iter().map(|&to| (vma, to, Edge::Branch)));
+        self.edges.extend(targets.iter().map(|&to| (vma, to, Edge::Ran)));
         let Some(n) = self.nodes.iter().rev().find(|n| n.vma == vma) else { return };
-        let based: Vec<Pending> = n.outs.iter().filter(|(f, _)| f.base).map(|(f, _)| f.p).collect();
+        let ran: Vec<Fact> = n.outs.iter().map(|(f, _)| *f).collect();
         for &to in targets {
-            self.reach(to, &based);
+            self.reach(to, &ran);
         }
     }
 
     /// Hand `carry` to the instruction at `to`. What the walk carries is a
     /// candidate the meet in [`PicPool::finish`] settles, so a second edge into
     /// an undecoded instruction only narrows it.
-    fn reach(&mut self, to: u64, carry: &[Pending]) {
+    fn reach(&mut self, to: u64, carry: &[Fact]) {
         if carry.is_empty() {
             return;
         }
-        match self.bases_at.get_mut(&to) {
-            Some(have) => have.retain(|h| carry.contains(h)),
+        let one = |a: &Fact, b: &Fact| a.same(b) && a.p.origin == b.p.origin;
+        match self.at.get_mut(&to) {
+            Some(have) => have.retain(|h| carry.iter().any(|c| one(h, c))),
             None => {
-                self.bases_at.insert(to, carry.to_vec());
+                self.at.insert(to, carry.to_vec());
             }
         }
     }
@@ -519,9 +520,7 @@ impl PicPool {
             index.get(&from).is_some_and(|&i| {
                 let n = &self.nodes[i];
                 let carried = if kind == Edge::Skip { &n.skip } else { &n.outs };
-                carried
-                    .iter()
-                    .any(|(o, deps)| deps & !valid[i] == 0 && (o.base || kind != Edge::Branch) && o.same(f))
+                carried.iter().any(|(o, deps)| deps & !valid[i] == 0 && o.same(f))
             })
         };
         let mut changed = true;
@@ -627,7 +626,7 @@ fn evaluate(vma: u64, ops: &[FullOp], ins: &[Fact], img: &Image) -> Eval {
             let made = composed && in_range(mapped, val.v) && got.is_some_and(|g| g.contains(val.v));
             if made || copied {
                 new_bases.retain(|(b, _)| !spans_overlap(b.off, b.size, off, size));
-                new_bases.push((Pending { off, size, word: val.v, hops: 0, origin: 0 }, val.deps));
+                new_bases.push((Pending { off, size, word: val.v, age: 0, cond: None, origin: 0 }, val.deps));
             }
         }
         vals.push((key, val));
@@ -678,7 +677,7 @@ fn seed(
             continue;
         }
         let Some(word) = pool.word_at(addr) else { continue };
-        return Some(Pending { off: out.offset, size: out.size, word, hops: 0, origin: vma });
+        return Some(Pending { off: out.offset, size: out.size, word, age: 0, cond: None, origin: vma });
     }
     None
 }
@@ -693,22 +692,24 @@ fn branches_to(op: &FullOp, to: u64) -> bool {
     op.ins.first().is_some_and(|vn| !is_constant(vn) && vn.offset == to)
 }
 
-/// Does control leave the straight-line run here, so the fall-through is not the
-/// next thing executed?
+/// Does this instruction end every pool word it was handed?
 ///
-/// A `CBRANCH` is deliberately not in the set: its fall-through IS a successor,
-/// it writes nothing, and ARM spells a predicated instruction that way. A call is
-/// not either: it ends only the values the calling convention does not preserve
-/// (`survives_calls`), since GCC schedules `ldr r4,[pc,#..]` before a call and
-/// its `add r4,pc,r4` after it. A `CALLOTHER` ends everything, except inside a
-/// call, where it is the Thumb `bl`'s mode switch and the call already decides.
-fn leaves_the_run(ops: &[FullOp]) -> bool {
+/// A `CALLOTHER` does, since what it writes is not modelled, except inside a
+/// call, where it is the Thumb `bl`'s mode switch and the call's own rule
+/// (`survives_calls`) decides: GCC schedules `ldr r4,[pc,#..]` before a call
+/// and its `add r4,pc,r4` after it.
+fn ends_words(ops: &[FullOp]) -> bool {
     let calls = ops.iter().any(|op| matches!(op.opcode, OpCode::CPUI_CALL | OpCode::CPUI_CALLIND));
-    ops.iter().any(|op| match op.opcode {
-        OpCode::CPUI_BRANCH | OpCode::CPUI_BRANCHIND | OpCode::CPUI_RETURN => true,
-        OpCode::CPUI_CALLOTHER => !calls,
-        _ => false,
-    })
+    !calls && ops.iter().any(|op| op.opcode == OpCode::CPUI_CALLOTHER)
+}
+
+/// The [`MAX_TRACKED`] youngest pool words, ties broken by register and load so
+/// every run keeps the same ones.
+fn youngest(words: impl Iterator<Item = (Fact, u32)>) -> Vec<(Fact, u32)> {
+    let mut words: Vec<(Fact, u32)> = words.collect();
+    words.sort_by_key(|(f, _)| (f.p.age, f.p.off, f.p.origin));
+    words.truncate(MAX_TRACKED);
+    words
 }
 
 /// Is the value's whole register callee-saved?
@@ -1207,20 +1208,108 @@ mod tests {
         assert!(w.finish().refs.is_empty());
     }
 
-    /// Nothing is tracked past the hop bound.
+    /// `nop` stand-in: an instruction that touches no tracked register.
+    fn other(s: &Spaces) -> Vec<FullOp> {
+        vec![op(OpCode::CPUI_INT_ADD, Some(vn(&s.reg, 0x3c, 4)), vec![vn(&s.reg, 0x3c, 4), vn(&s.konst, 4, 4)])]
+    }
+
+    /// `ops` under a condition, as A32 lifts it: a branch to the next
+    /// instruction when the condition fails, then the body.
+    fn predicated(s: &Spaces, next: u64, ops: Vec<FullOp>) -> Vec<FullOp> {
+        let mut v = vec![
+            op(OpCode::CPUI_BOOL_NEGATE, Some(vn(&s.uniq, 0x100, 1)), vec![vn(&s.reg, 0x101, 1)]),
+            op(OpCode::CPUI_CBRANCH, None, vec![vn(&s.ram, next, 4), vn(&s.uniq, 0x100, 1)]),
+        ];
+        v.extend(ops);
+        v
+    }
+
+    /// A word lives until its register is written, however far its `add` is.
     #[test]
-    fn a_word_is_not_believed_forever() {
+    fn a_word_reaches_an_add_far_past_its_load() {
         let (s, pool) = (spaces(), image());
-        let nothing: Vec<FullOp> = Vec::new();
         let mut w = Walk::new(&s, &pool, &MAPPED);
         w.step(0x600, &ldr(&s, 0x20, 0x6a0), &[]);
         let mut vma = 0x604;
-        for _ in 0..MAX_HOPS {
-            w.step(vma, &nothing, &[]);
+        for _ in 0..24 {
+            w.step(vma, &other(&s), &[]);
             vma += 4;
         }
         w.step(vma, &add_pc(&s, 0x20, vma), &[]);
+        assert_eq!(refs(&w.finish()), vec![(vma, (vma + 8).wrapping_sub(0x1c1), XrefKind::Data)]);
+    }
+
+    /// A word crosses a branch to its `add`.
+    #[test]
+    fn a_word_crosses_a_branch_to_its_add() {
+        let (s, pool) = (spaces(), image());
+        let mut w = Walk::new(&s, &pool, &MAPPED);
+        w.step(0x600, &ldr(&s, 0x20, 0x6a0), &[]);
+        w.step(0x604, &jump(&s, 0x640), &[0x640]);
+        w.step(0x640, &add_pc(&s, 0x20, 0x640), &[]);
+        assert_eq!(refs(&w.finish()), vec![(0x640, 0x487, XrefKind::Data)], "0x648 + (-0x1c1)");
+    }
+
+    /// A join one path reaches without the word does not believe it.
+    #[test]
+    fn a_word_one_path_lacks_is_not_believed_at_the_join() {
+        let (s, pool) = (spaces(), image());
+        let mut w = Walk::new(&s, &pool, &MAPPED);
+        let clobber = vec![op(OpCode::CPUI_COPY, Some(vn(&s.reg, 0x20, 4)), vec![vn(&s.konst, 0, 4)])];
+        w.step(0x600, &ldr(&s, 0x20, 0x6a0), &[]);
+        w.step(0x604, &cbranch(&s, 0x640), &[0x640]);
+        w.step(0x640, &add_pc(&s, 0x20, 0x640), &[]);
+        w.step(0x608, &clobber, &[]);
+        w.step(0x60c, &jump(&s, 0x640), &[0x640]);
         assert!(w.finish().refs.is_empty());
+    }
+
+    /// A predicated pair (`ldrne; addne`) runs under one condition, so the word
+    /// is assumed on the skip path and the pair composes.
+    #[test]
+    fn a_predicated_pair_composes() {
+        let (s, pool) = (spaces(), image());
+        let mut w = Walk::new(&s, &pool, &MAPPED);
+        w.step(0x600, &predicated(&s, 0x604, ldr(&s, 0x20, 0x6a0)), &[0x604]);
+        w.step(0x604, &predicated(&s, 0x608, add_pc(&s, 0x20, 0x604)), &[0x608]);
+        assert_eq!(refs(&w.finish()), vec![(0x604, 0x44b, XrefKind::Data)], "0x60c + (-0x1c1)");
+    }
+
+    /// That assumption is bounded: a word a predicated load produced is not
+    /// believed past [`MAX_COND_HOPS`] instructions, while an unconditional one
+    /// is.
+    #[test]
+    fn a_predicated_load_is_believed_only_for_a_few_instructions() {
+        let (s, pool) = (spaces(), image());
+        for (cond, gap, composes) in [(true, MAX_COND_HOPS - 1, true), (true, MAX_COND_HOPS, false), (false, 20, true)] {
+            let load = if cond { predicated(&s, 0x604, ldr(&s, 0x20, 0x6a0)) } else { ldr(&s, 0x20, 0x6a0) };
+            let mut w = Walk::new(&s, &pool, &MAPPED);
+            w.step(0x600, &load, if cond { &[0x604] } else { &[] });
+            let mut vma = 0x604;
+            for _ in 0..gap {
+                w.step(vma, &other(&s), &[]);
+                vma += 4;
+            }
+            w.step(vma, &add_pc(&s, 0x20, vma), &[]);
+            assert_eq!(!w.finish().refs.is_empty(), composes, "cond {cond}, gap {gap}");
+        }
+    }
+
+    /// More than [`MAX_TRACKED`] words in flight: the oldest is dropped.
+    #[test]
+    fn the_oldest_word_is_dropped_first() {
+        let (s, pool) = (spaces(), image());
+        let regs: Vec<u64> = (0..=MAX_TRACKED as u64).map(|i| 0x100 + 4 * i).collect();
+        for (reg, composes) in [(regs[0], false), (regs[MAX_TRACKED], true), (regs[1], true)] {
+            let mut w = Walk::new(&s, &pool, &MAPPED);
+            let mut vma = 0x600;
+            for &r in &regs {
+                w.step(vma, &ldr(&s, r, 0x6a0), &[]);
+                vma += 4;
+            }
+            w.step(vma, &add_pc(&s, reg, vma), &[]);
+            assert_eq!(!w.finish().refs.is_empty(), composes, "reg {reg:#x}");
+        }
     }
 
     // --- GOT bases -----------------------------------------------------------
@@ -1567,6 +1656,25 @@ mod tests {
         w.step(0x60c, &slot_load(&s), &[]);
         w.step(0x610, &cbranch(&s, 0x608), &[0x608]);
         assert_eq!(slot_refs(&w.finish(), 0x60c), SLOT_REFS.to_vec());
+    }
+
+    /// A GOT offset loaded long before the base pair and the slot load, as GCC
+    /// hoists it, still reaches the slot load.
+    #[test]
+    fn a_got_offset_loaded_far_ahead_reaches_the_slot_load() {
+        let (s, pool, got) = (spaces(), got_pool(), got_image());
+        let mut w = Walk::new(&s, &pool, &GOT_MAP);
+        w.got = Some(&got);
+        w.step(0x5c0, &ldr(&s, R2, 0x6a4), &[]);
+        let mut vma = 0x5c4;
+        while vma < 0x600 {
+            w.step(vma, &other(&s), &[]);
+            vma += 4;
+        }
+        w.step(0x600, &ldr(&s, R4, 0x6a0), &[]);
+        w.step(0x604, &add_pc(&s, R4, 0x604), &[]);
+        w.step(0x608, &slot_load(&s), &[]);
+        assert_eq!(slot_refs(&w.finish(), 0x608), SLOT_REFS.to_vec());
     }
 
     /// The walk decodes the entry before any edge into it, so a branch back to

@@ -6109,10 +6109,15 @@ chance, and only the PC fold below decides that it is one. A32 reads the slot
 with a `LOAD` from a constant address; Thumb's literal loads, the 16-bit `ldr`
 and `ldr.w`, export the slot itself with the word-aligned PC already folded in,
 so they lift as a `COPY` out of the image, and both forms are read. It is then
-carried forward along fall-through alone, for a bounded run of instructions, and
-dropped at the first write of its register, at any branch or return, and at a
-call unless its register is callee-saved (GCC schedules the load before a call
-and its `add` after). A user-defined operation ends it too, except inside a
+carried along every edge of the function — fall-through, branches and switch
+cases — until its register is written, and across a call only when its register
+is callee-saved (GCC schedules the load before a call and its `add` after, and
+hoists a GOT offset's load twenty or more instructions ahead of the slot load
+that uses it). No hop count bounds it: at most eight pool words are carried
+into any one instruction, the youngest kept and ties broken by register and
+load address so every run keeps the same ones, which bounds the cost of a
+function to eight words per instruction its walk decodes. A user-defined
+operation ends every pool word, except inside a
 call, where it is the Thumb `bl`'s instruction-set switch and the call's own rule
 decides — the walk is breadth-first, so the values are keyed by
 the address they reach rather than held as "the previous instruction's state",
@@ -6183,7 +6188,10 @@ which carries what it was handed less what its condition wrote. A base meets
 both, so a conditional write to the base ends it after the instruction, while a
 predicated return such as `popeq {r4-r6,pc}` leaves the base to the path that
 falls past it. Pool words follow the instruction when it falls through, because
-a predicated pair (`ldrne; addne`) runs under one condition.
+a predicated pair (`ldrne; addne`) runs under one condition. That is an
+assumption about the path where the instruction did not run, so a word a
+predicated instruction loaded is believed for only eight more instructions; an
+unconditional load's word has no such limit.
 
 Nothing is recorded before a body's first pool load, since nothing can be in
 flight; this keeps the walk's cost on bodies, and architectures, that never form
@@ -6194,12 +6202,10 @@ holds there, which is exactly what the meet over every edge would answer. An
 instruction that a recovered frame's walk refused to enter is treated the same
 way, because the frame's edge into it is in no other body's record.
 
-Three shapes are not covered. A GOT base inherited from a caller (one the
+Two shapes are not covered. A GOT base inherited from a caller (one the
 function never forms itself) is not tracked: on ARM the register that holds it is
 only callee-saved, not reserved, so assuming it would need every caller to
-agree. A pool word does not cross a branch, so a slot load reached by a branch, as when
-GCC merges the tails of switch cases into one shared `ldr r3,[r6,r3]`, files
-nothing, even when every path brings the same offset. And code that a function walked
+agree. And code that a function walked
 later reaches by jumping into a body already walked is not part of that body's
 meet.
 
