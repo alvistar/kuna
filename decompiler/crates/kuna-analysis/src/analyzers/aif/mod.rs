@@ -871,10 +871,11 @@ pub fn run_aif(
     aifpoolslide: Option<&kuna_decomp::architecture::Architecture>,
 ) -> Vec<u64> {
     run_aif_sharing(listing, translate, code_space, exec_ranges, aifstrict, aifcorroborate, aifbracket,
-        aifnoppad, aifpoolslide, None)
+        aifnoppad, aifpoolslide, None, None)
 }
 
-/// [`run_aif`] over decodes shared through `memo`.
+/// [`run_aif`] over decodes shared through `memo`, probing only the gaps that
+/// touch one of the `near` instruction bounds when it is given.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_aif_sharing(
     listing: &Listing,
@@ -887,6 +888,7 @@ pub(crate) fn run_aif_sharing(
     aifnoppad: bool,
     aifpoolslide: Option<&kuna_decomp::architecture::Architecture>,
     memo: Option<&Rc<crate::listing::kuna_decodememo::DecodeMemo>>,
+    near: Option<&BTreeSet<u64>>,
 ) -> Vec<u64> {
     let _probe = arm_gap_probe_scope(translate);
     let poolslide = aifpoolslide.map(|arch| (arch, Rc::clone(&code_space)));
@@ -894,7 +896,7 @@ pub(crate) fn run_aif_sharing(
     decoder.share(memo);
     let policy = GapWalk {
         strict: aifstrict, corroborate: aifcorroborate, bracket: aifbracket, noppad: aifnoppad,
-        poolslide,
+        poolslide, near,
     };
     aif_candidates(listing, listing, &mut decoder, policy, &BTreeMap::new(), None, None)
 }
@@ -922,7 +924,7 @@ pub(crate) fn run_aif_after_frames(
     decoder.straight_line = straight_line.is_some().then(BTreeSet::new);
     let policy = GapWalk {
         strict: aifstrict, corroborate: aifcorroborate, bracket: aifbracket, noppad: aifnoppad,
-        poolslide,
+        poolslide, near: None,
     };
     let entries = aif_candidates(listing, listing, &mut decoder, policy, &BTreeMap::new(), None, None);
     if let (Some(out), Some(reached)) = (straight_line.as_deref_mut(), decoder.straight_line.take()) {
@@ -951,7 +953,7 @@ fn run_aif_with_decoder(
 ) -> Vec<u64> {
     let gap_walk = GapWalk {
         strict: aifstrict, corroborate: aifcorroborate, bracket: aifbracket, noppad: aifnoppad,
-        poolslide: None,
+        poolslide: None, near: None,
     };
     aif_candidates(listing, listing, decoder, gap_walk, &BTreeMap::new(), None, None)
 }
@@ -964,6 +966,15 @@ struct GapWalk<'e> {
     bracket: Option<&'e kuna_aifbracket::BracketEvidence>,
     noppad: bool,
     poolslide: Option<(&'e kuna_decomp::architecture::Architecture, Rc<AddrSpace>)>,
+    near: Option<&'e BTreeSet<u64>>,
+}
+
+/// Whether the gap `[gap_start, gap_hi)` opens or closes on one of the `near` bounds.
+fn touches(listing: &Listing, near: &BTreeSet<u64>, gap_start: u64, gap_hi: u64) -> bool {
+    near.range(..=gap_hi).next_back().is_some_and(|&at| {
+        at >= gap_start
+            || listing.next_instruction_start_after(at.wrapping_sub(1)).is_none_or(|next| next >= gap_hi)
+    })
 }
 
 /// Frame-prefix probes skip claimed spans and gaps containing no frame roots.
@@ -977,7 +988,7 @@ fn aif_candidates(
     roots: Option<&BTreeSet<u64>>,
     mut bodies: Option<&mut BTreeMap<u64, ProbedBody>>,
 ) -> Vec<u64> {
-    let GapWalk { strict: aifstrict, corroborate: aifcorroborate, bracket, noppad, poolslide } = policy;
+    let GapWalk { strict: aifstrict, corroborate: aifcorroborate, bracket, noppad, poolslide, near } = policy;
     let bracket = bracket.filter(|_| roots.is_none());
     let mut padding = (noppad && roots.is_none()).then(|| kuna_aifnoppad::PaddingRuns::new(decoder));
     let mut literals = if roots.is_some() {
@@ -1030,7 +1041,9 @@ fn aif_candidates(
                 .map(|&(_, hi)| hi).expect("undefined address belongs to an executable range");
             scan_end = gap_hi.min(exec_hi);
         }
-        if roots.is_some_and(|roots| roots.range(gap_start..gap_hi).next().is_none()) {
+        if roots.is_some_and(|roots| roots.range(gap_start..gap_hi).next().is_none())
+            || near.is_some_and(|near| !touches(listing, near, gap_start, gap_hi))
+        {
             cursor = if gap_hi == u64::MAX { None } else { listing.first_undefined_after(gap_hi) };
             continue;
         }

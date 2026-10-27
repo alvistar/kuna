@@ -837,6 +837,7 @@ fn descend(
     pending_focus.reverse();
     let mut deferred_focus = if gapwalk && !prologues { std::mem::take(&mut pending_focus) } else { Vec::new() };
     let mut focus_decoded_from: Option<usize> = None;
+    let mut focus_bounds: Option<BTreeSet<u64>> = None;
     let mut focused: Vec<u64> = Vec::new();
 
     loop {
@@ -1008,16 +1009,20 @@ fn descend(
                         arch.analysis_aifbracket
                             .then(|| crate::aif::kuna_aifbracket::BracketEvidence::from_object(file, &exec))
                             .as_ref(),
+                        focus_bounds.take().as_ref(),
                     );
                     pending_focus.extend(found.into_iter().rev());
                     continue;
                 }
                 None if !deferred_focus.is_empty() => {
                     pending_focus = std::mem::take(&mut deferred_focus);
-                    focus_decoded_from = Some(st.decoded.len());
+                    focus_decoded_from = Some(partition.len());
                     continue;
                 }
-                None if focus_decoded_from.take().is_some_and(|before| st.decoded.len() > before) => {
+                None if focus_decoded_from.is_some_and(|before| partition.len() > before) => {
+                    let before = focus_decoded_from.take().unwrap();
+                    focus_bounds = Some(partition[before..].iter()
+                        .flat_map(|&(at, len)| [at, at.wrapping_add(u64::from(len))]).collect());
                     gapwalk_done = false;
                     continue;
                 }
@@ -1438,6 +1443,7 @@ fn gap_entries(
     contexts: Option<&super::kuna_fingerprintcontext::FingerprintContexts>,
     frame: Option<&super::Listing>,
     bracket: Option<&crate::aif::kuna_aifbracket::BracketEvidence>,
+    near: Option<&BTreeSet<u64>>,
 ) -> Vec<u64> {
     if funcs.len() < AIF_MIN_FUNCTIONS || partition.is_empty() {
         return Vec::new();
@@ -1454,10 +1460,10 @@ fn gap_entries(
             poolslide, None, None,
         )
     } else {
-        crate::aif::run_aif(
+        crate::aif::run_aif_sharing(
             &listing, translate, Rc::clone(code_space), listing.exec_ranges(),
             arch.analysis_aifstrict, arch.analysis_aifcorroborate, bracket, arch.analysis_aifnoppad,
-            poolslide,
+            poolslide, None, near,
         )
     }
 }

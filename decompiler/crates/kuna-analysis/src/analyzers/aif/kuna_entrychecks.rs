@@ -58,6 +58,7 @@ pub(crate) fn run(
             arch.analysis_aifnoppad,
             poolslide,
             memo,
+            None,
         )
     };
     let mut pool_entries = Vec::new();

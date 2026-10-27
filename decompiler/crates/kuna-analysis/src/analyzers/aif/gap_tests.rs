@@ -488,7 +488,7 @@ fn expanded_fingerprints_reuse_only_context_neutral_frame_instructions() {
 }
 
 fn frame_policy() -> GapWalk<'static> {
-    GapWalk { strict: true, corroborate: false, bracket: None, noppad: false, poolslide: None }
+    GapWalk { strict: true, corroborate: false, bracket: None, noppad: false, poolslide: None, near: None }
 }
 
 #[test]

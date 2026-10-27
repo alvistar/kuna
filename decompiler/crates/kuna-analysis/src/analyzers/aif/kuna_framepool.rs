@@ -13,6 +13,7 @@ pub(super) fn policy(
         bracket: None,
         noppad: false,
         poolslide: arch.analysis_aifpoolslide.then_some((arch, code_space)),
+        near: None,
     }
 }
 
