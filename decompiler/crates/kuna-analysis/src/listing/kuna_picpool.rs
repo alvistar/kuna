@@ -518,13 +518,17 @@ impl PicPool {
             }
         }
 
-        let ran: Vec<Fact> = outs
-            .iter()
-            .filter(|(f, _)| !f.is_word())
-            .take(MAX_TRACKED)
-            .chain(outs.iter().filter(|(f, _)| f.is_word()))
-            .map(|(f, _)| *f)
-            .collect();
+        let ran: Vec<Fact> = if window {
+            outs.iter()
+                .filter(|(f, _)| !f.is_word())
+                .take(MAX_TRACKED)
+                .chain(outs.iter().filter(|(f, _)| f.is_word()))
+                .map(|(f, _)| *f)
+                .collect()
+        } else {
+            keep_youngest(&mut outs);
+            outs.iter().map(|(f, _)| *f).collect()
+        };
         let skipped: Vec<Fact> = skip.iter().map(|(f, _)| *f).collect();
         let based: Vec<Fact> = ran.iter().filter(|f| !f.is_word() || !window).copied().collect();
         let reach = fall
@@ -970,6 +974,29 @@ fn youngest(words: impl Iterator<Item = (Pending, u32)>, window: bool) -> Vec<(P
     }
     words.truncate(MAX_TRACKED);
     words
+}
+
+/// The [`MAX_TRACKED`] youngest bases and, separately, slots of `outs`, which
+/// lists what an instruction was handed before what it made, so a base made
+/// or spilled here is never the one dropped.
+fn keep_youngest(outs: &mut Vec<(Fact, u32)>) {
+    let (mut bases, mut slots) = (0, 0);
+    let mut keep: Vec<bool> = outs
+        .iter()
+        .rev()
+        .map(|(f, _)| {
+            let n = match f {
+                Fact::Word(_) => return true,
+                Fact::Base(_) => &mut bases,
+                Fact::Slot(_) => &mut slots,
+            };
+            *n += 1;
+            *n <= MAX_TRACKED
+        })
+        .collect();
+    keep.reverse();
+    let mut keep = keep.into_iter();
+    outs.retain(|_| keep.next().unwrap_or(true));
 }
 
 /// Is the whole register callee-saved?
@@ -1809,6 +1836,35 @@ mod tests {
         w.step(0x610, &jump(&s, 0x620), &[0x620]);
         w.step(0x624, &slot_load(&s), &[]);
         assert_eq!(slot_refs(&w.finish(), 0x624), SLOT_REFS.to_vec());
+    }
+
+    /// More than [`MAX_TRACKED`] bases: the one this instruction made is kept
+    /// and the oldest is dropped, as for words.
+    #[test]
+    fn the_base_an_instruction_makes_is_kept_over_the_oldest() {
+        let (s, pool, got) = (spaces(), got_pool(), got_image());
+        let mov = |to: u64| vec![op(OpCode::CPUI_COPY, Some(vn(&s.reg, to, 4)), vec![vn(&s.reg, R4, 4)])];
+        let through = |base: u64| {
+            vec![
+                op(OpCode::CPUI_INT_ADD, Some(vn(&s.uniq, 0x2f00, 4)), vec![vn(&s.reg, base, 4), vn(&s.reg, R2, 4)]),
+                op(OpCode::CPUI_LOAD, Some(vn(&s.reg, R2, 4)), vec![vn(&s.konst, ram_id(&s), 8), vn(&s.uniq, 0x2f00, 4)]),
+            ]
+        };
+        let copies: Vec<u64> = (0..MAX_TRACKED as u64).map(|i| 0x80 + 4 * i).collect();
+        for (base, kept) in [(copies[MAX_TRACKED - 1], true), (R4, false)] {
+            let mut w = Walk::new(&s, &pool, &GOT_MAP);
+            w.got = Some(&got);
+            w.step(0x600, &ldr(&s, R4, 0x6a0), &[]);
+            w.step(0x604, &add_pc(&s, R4, 0x604), &[]);
+            let mut vma = 0x608;
+            for &r in &copies {
+                w.step(vma, &mov(r), &[]);
+                vma += 4;
+            }
+            w.step(vma, &ldr(&s, R2, 0x6a4), &[]);
+            w.step(vma + 4, &through(base), &[]);
+            assert_eq!(!slot_refs(&w.finish(), vma + 4).is_empty(), kept, "base {base:#x}");
+        }
     }
 
     /// A predicated instruction (`ldrne`) spells its condition as a branch to its
