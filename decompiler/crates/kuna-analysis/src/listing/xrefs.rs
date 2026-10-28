@@ -1056,9 +1056,8 @@ fn descend(
         // body before any of it can be attributed (`kuna_picbase::scope`), and
         // buffering it costs nothing on the overwhelmingly common `None` path.
         let mut body: Vec<kuna_picbase::BaseCandidate> = Vec::new();
-        // (kuna) `picpool`: the pool words this body is carrying towards the
-        // `add` that turns each into an address. Per function, because the values
-        // it tracks are live only inside one straight-line run.
+        // (kuna) `picpool`: the values this body carries along its own edges,
+        // settled by `PicPool::finish` once it drains.
         let mut picpool = PicPool::default();
         // (kuna) `picpool`: `poolref` rows for pool words still in flight, filed
         // once the body drains unless a PC fold consumed the word.
