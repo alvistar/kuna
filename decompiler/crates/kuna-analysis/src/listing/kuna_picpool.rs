@@ -574,15 +574,14 @@ impl PicPool {
 
     /// Hand `carry` to the instruction at `to`. What the walk carries is a
     /// candidate the meet in [`PicPool::finish`] settles, so a second edge into
-    /// an undecoded instruction only narrows it.
+    /// an undecoded instruction only narrows it, by the same rule
+    /// ([`Fact::same`]): a word is the same whichever pool load it came from.
     fn reach(&mut self, to: u64, carry: &[Fact]) {
         if carry.is_empty() {
             return;
         }
-        let origin = |f: &Fact| if let Fact::Word(p) = f { p.origin } else { 0 };
-        let one = |a: &Fact, b: &Fact| a.same(b) && origin(a) == origin(b);
         match self.at.get_mut(&to) {
-            Some(have) => have.retain(|h| carry.iter().any(|c| one(h, c))),
+            Some(have) => have.retain(|h| carry.iter().any(|c| h.same(c))),
             None => {
                 self.at.insert(to, carry.to_vec());
             }
@@ -594,7 +593,9 @@ impl PicPool {
     /// Starting from what the walk carried, a value is dropped at an instruction
     /// unless every recorded predecessor passes on the same one, and everything
     /// computed from a dropped value goes with it, until nothing changes. An
-    /// address is answered only when all the values it was formed from survived.
+    /// address is answered only when all the values it was formed from survived,
+    /// and every pool load whose word reached it along a surviving edge is a
+    /// displacement.
     /// The entry needs no rule of its own: the walk decodes it first, so nothing
     /// is carried into it. An instruction in `entered` has a predecessor in
     /// another body's walk, outside this record, so nothing holds there.
@@ -641,19 +642,78 @@ impl PicPool {
                 }
             }
         }
+        let origins = self.origins(&valid, &index, &preds);
         for (i, n) in self.nodes.iter().enumerate() {
             for &(to, kind, deps, origin) in &n.refs {
                 if deps & !valid[i] == 0 {
                     verdict.refs.push((n.vma, to, kind));
-                    if origin != 0 {
-                        verdict.displaced.insert(origin);
+                    verdict.displaced.insert(origin);
+                    for (j, from) in origins[i].iter().enumerate() {
+                        if deps & (1 << j) != 0 {
+                            verdict.displaced.extend(from);
+                        }
                     }
                 }
             }
         }
+        verdict.displaced.remove(&0);
         verdict.refs.sort_unstable();
         verdict.refs.dedup();
         verdict
+    }
+}
+
+impl PicPool {
+    /// For each node's surviving words, the pool loads that delivered them
+    /// along any edge, until nothing changes.
+    fn origins(
+        &self,
+        valid: &[u32],
+        index: &HashMap<u64, usize>,
+        preds: &HashMap<u64, Vec<(u64, Edge)>>,
+    ) -> Vec<Vec<Vec<u64>>> {
+        let mut origins: Vec<Vec<Vec<u64>>> = self
+            .nodes
+            .iter()
+            .map(|n| n.ins.iter().map(|f| if let Fact::Word(p) = f { vec![p.origin] } else { Vec::new() }).collect())
+            .collect();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (i, n) in self.nodes.iter().enumerate() {
+                let ps = preds.get(&n.vma).map_or(&[][..], Vec::as_slice);
+                for (j, f) in n.ins.iter().enumerate() {
+                    if !f.is_word() || valid[i] & (1 << j) == 0 {
+                        continue;
+                    }
+                    let mut add: Vec<u64> = Vec::new();
+                    for &(from, kind) in ps {
+                        let Some(&k) = index.get(&from) else { continue };
+                        let carried = if kind == Edge::Skip { &self.nodes[k].skip } else { &self.nodes[k].outs };
+                        for (o, deps) in carried.iter().filter(|(o, deps)| deps & !valid[k] == 0 && o.same(f)) {
+                            match (o, *deps) {
+                                (Fact::Word(p), 0) => add.push(p.origin),
+                                (_, deps) => {
+                                    for (m, got) in origins[k].iter().enumerate() {
+                                        if deps & (1 << m) != 0 {
+                                            add.extend(got);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    add.retain(|o| !origins[i][j].contains(o));
+                    if !add.is_empty() {
+                        add.sort_unstable();
+                        add.dedup();
+                        origins[i][j].extend(add);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        origins
     }
 }
 
@@ -1473,6 +1533,30 @@ mod tests {
         w.step(0x608, &clobber, &[]);
         w.step(0x60c, &jump(&s, 0x640), &[0x640]);
         assert!(w.finish().refs.is_empty());
+    }
+
+    /// Two pool loads of the same word, one on each path into the `add`: the
+    /// word is the same whichever load it came from, so it holds at the join
+    /// in either arrival order, and both loads are displacements.
+    #[test]
+    fn the_same_word_from_two_loads_meets_whichever_edge_arrives_first() {
+        const TWICE: [u8; 8] = [0x3f, 0xfe, 0xff, 0xff, 0x3f, 0xfe, 0xff, 0xff];
+        let s = spaces();
+        let pool = PoolImage::from_ranges(vec![(0x6a0, 0x6a8, &TWICE[..])], 4, true).unwrap();
+        let a = [(0x600, ldr(&s, 0x20, 0x6a0), vec![]), (0x604, jump(&s, 0x640), vec![0x640])];
+        let b = [(0x620, ldr(&s, 0x20, 0x6a4), vec![]), (0x624, jump(&s, 0x640), vec![0x640])];
+        let join = [(0x640, add_pc(&s, 0x20, 0x640), vec![])];
+        let forward: Vec<_> = a.iter().chain(&b).chain(&join).collect();
+        let back: Vec<_> = a.iter().chain(&join).chain(&b).collect();
+        for (name, order) in [("forward", forward), ("back edge", back)] {
+            let mut w = Walk::new(&s, &pool, &MAPPED);
+            for (vma, ops, branches) in order {
+                w.step(*vma, ops, branches);
+            }
+            let v = w.finish();
+            assert_eq!(refs(&v), vec![(0x640, 0x487, XrefKind::Data)], "{name}");
+            assert_eq!(v.displaced, HashSet::from([0x600, 0x620]), "{name}");
+        }
     }
 
     /// A predicated pair (`ldrne; addne`) runs under one condition, so the word
