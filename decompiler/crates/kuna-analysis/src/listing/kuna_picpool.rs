@@ -600,7 +600,7 @@ impl PicPool {
     /// computed from a dropped value goes with it, until nothing changes. An
     /// address is answered only when all the values it was formed from survived,
     /// and every pool load whose word reached it along a surviving edge is a
-    /// displacement.
+    /// displacement; with `picpoolreach` off, only the load the fold names.
     /// The entry needs no rule of its own: the walk decodes it first, so nothing
     /// is carried into it. An instruction in `entered` has a predecessor in
     /// another body's walk, outside this record, so nothing holds there.
@@ -647,13 +647,13 @@ impl PicPool {
                 }
             }
         }
-        let origins = self.origins(&valid, &index, &preds);
+        let origins = if self.window { Vec::new() } else { self.origins(&valid, &index, &preds) };
         for (i, n) in self.nodes.iter().enumerate() {
             for &(to, kind, deps, origin) in &n.refs {
                 if deps & !valid[i] == 0 {
                     verdict.refs.push((n.vma, to, kind));
                     verdict.displaced.insert(origin);
-                    for (j, from) in origins[i].iter().enumerate() {
+                    for (j, from) in origins.get(i).into_iter().flatten().enumerate() {
                         if deps & (1 << j) != 0 {
                             verdict.displaced.extend(from);
                         }
@@ -1639,6 +1639,31 @@ mod tests {
         w.step(0x604, &jump(&s, 0x640), &[0x640]);
         w.step(0x640, &add_pc(&s, 0x20, 0x640), &[]);
         assert!(w.finish().refs.is_empty(), "no word across a branch");
+    }
+
+    /// One instruction that folds two pool words with the PC: on, both loads
+    /// are displacements; off, only the one the fold names, as before the
+    /// option.
+    #[test]
+    fn picpoolreach_off_displaces_only_the_load_the_fold_names() {
+        const TWO: [u8; 8] = [0x3f, 0xfe, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00];
+        let s = spaces();
+        let pool = PoolImage::from_ranges(vec![(0x6a0, 0x6a8, &TWO[..])], 4, true).unwrap();
+        let both = vec![
+            op(OpCode::CPUI_INT_ADD, Some(vn(&s.uniq, 0x2f04, 4)), vec![vn(&s.reg, 0x20, 4), vn(&s.reg, 0x24, 4)]),
+            op(OpCode::CPUI_INT_ADD, Some(vn(&s.uniq, 0x2f00, 4)), vec![vn(&s.konst, 0x608, 4), vn(&s.konst, 8, 4)]),
+            op(OpCode::CPUI_INT_ADD, Some(vn(&s.reg, 0x20, 4)), vec![vn(&s.uniq, 0x2f00, 4), vn(&s.uniq, 0x2f04, 4)]),
+        ];
+        for (reach, displaced) in [(true, HashSet::from([0x600, 0x604])), (false, HashSet::from([0x600]))] {
+            let mut w = Walk::new(&s, &pool, &MAPPED);
+            w.reach = reach;
+            w.step(0x600, &ldr(&s, 0x20, 0x6a0), &[]);
+            w.step(0x604, &ldr(&s, 0x24, 0x6a4), &[]);
+            w.step(0x608, &both, &[]);
+            let v = w.finish();
+            assert_eq!(refs(&v), vec![(0x608, 0x44f, XrefKind::Data)], "reach {reach}");
+            assert_eq!(v.displaced, displaced, "reach {reach}");
+        }
     }
 
     /// More than [`MAX_TRACKED`] words in flight: the oldest is dropped.
