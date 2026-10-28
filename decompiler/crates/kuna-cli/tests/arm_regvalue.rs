@@ -57,11 +57,23 @@ fn a_pool_word_far_from_or_branched_to_its_use_still_forms_the_address() {
 #[test]
 fn a_got_base_reloaded_from_the_stack_reads_its_slots() {
     let path = fixture();
-    assert_eq!(rows(&path, 0x11008), vec![row(0x10420, "read")], "spilled, sp moved, reloaded");
+    assert_eq!(rows(&path, 0x11008), vec![row(0x10420, "read")], "spilled, r3 written, sp moved, reloaded");
     assert_eq!(rows(&path, 0x10830), vec![row(0x10420, "data")], "the slot's word");
     assert_eq!(rows(&path, 0x1100c), vec![row(0x1051c, "read")], "pushed and popped");
     assert!(rows(&path, 0x11010).is_empty(), "slot overwritten before the reload");
     assert!(rows(&path, 0x10850).is_empty());
+    std::fs::remove_file(path).unwrap();
+}
+
+/// A call may write any slot, and so may a store through a pointer the fold
+/// does not know: neither spilled base below is a base after them.
+#[test]
+fn a_call_or_a_store_through_an_unknown_pointer_ends_the_spilled_base() {
+    let path = fixture();
+    assert!(rows(&path, 0x11014).is_empty(), "a callee pushed over the slot");
+    assert!(rows(&path, 0x10860).is_empty());
+    assert!(rows(&path, 0x11018).is_empty(), "`add r1,sp,#4; str r0,[r1]` overwrote it");
+    assert!(rows(&path, 0x10870).is_empty());
     std::fs::remove_file(path).unwrap();
 }
 

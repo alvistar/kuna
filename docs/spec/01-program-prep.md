@@ -6174,12 +6174,19 @@ pointer as each instruction finds it: the instruction's own stack pointer enters
 its fold as offset 0, a store or load through it names a slot by its offset, and
 what the pointer holds at the end is how far the instruction moved it, by which
 every slot is re-offset. A load of a slot is a base, so a slot load through the
-reloaded register finds the GOT slot. A store through the stack pointer over the
-slot ends it, and so does a stack pointer the fold cannot follow (`mov sp,r7`);
-a store through any other pointer is assumed not to reach the slot, as Ghidra's
-stack model assumes, and a call does not end it, since a callee does not write
-its caller's frame. A frame pointer is not followed: a base reloaded through
-`[fp,#-k]` is not found. Slots meet at joins like any other value.
+reloaded register finds the GOT slot. A slot holds a base only, never a
+register's pool word, so no check on a register can reach it. What ends a slot
+follows the i386 `picbase` stack model: a store through the stack pointer over
+the slot, a stack pointer the fold cannot follow (`mov sp,r7`), any call or
+user-defined operation (a callee may push over a slot left below the stack
+pointer, or write one above it), and any store whose address is not the stack
+pointer plus a constant — through a register the fold does not know, an
+`sp`-derived one (`add r1,sp,#4; str r0,[r1]`), a frame pointer, or the stack
+pointer plus a register index — since such a store may alias any slot. A store
+through a known address off the stack (a GOT-relative one) leaves the slots. So
+a base spilled across a call is not found again. A frame pointer is not
+followed: a base reloaded through `[fp,#-k]` is not found. Slots meet at joins
+like any other value.
 
 (kuna) **Reach** (`picpoolreach`, default on) gates the two rules above that go
 past the earlier window: a pool word carried along every edge until its register

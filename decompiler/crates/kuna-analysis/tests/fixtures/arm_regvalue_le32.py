@@ -16,13 +16,20 @@ across a branch from, the instruction that uses it:
                         `ldr r1,[r5,r3]`, base pair adjacent; reads slot 0x11004
     far_branch 0x10300  `ldr r0,[pc]; b 1f; ...; 1: add r0,pc,r0` forms the
                         string at 0x10820
-    spill      0x10400  base made in r3, `str r3,[sp,#4]`, a call clobbers r3,
+    spill      0x10400  base made in r3, `str r3,[sp,#4]`, `mov r3,#0`,
                         `sub sp,sp,#8`, `ldr r2,[sp,#12]` reloads it, then
                         `ldr r1,[pc]; ldr r0,[r2,r1]` reads slot 0x11008
     pushpop    0x10500  base in r4, `push {r4}`, r4 overwritten, `pop {r4}`,
                         then reads slot 0x1100c through r4
     overwrite  0x10600  as `spill`, but `str r0,[sp,#4]` overwrites the slot
                         before the reload: no slot read may be filed
+    below      0x10700  the base stored at `[sp,#4]` after `sub sp,sp,#8`,
+                        `add sp,sp,#8` leaves it below the stack pointer, a
+                        callee pushes over it; the reload of slot 0x11014 may
+                        not be filed
+    viaptr     0x10780  the base stored at `[sp,#4]`, then `add r1,sp,#4;
+                        str r0,[r1]` overwrites it; the reload of slot 0x11018
+                        may not be filed
 """
 import pathlib
 import struct
@@ -31,7 +38,8 @@ import sys
 TEXT = 0x10000
 RODATA = 0x10800
 GOT = 0x11000
-STRINGS = [b'far pair\0', b'far offset\0', b'far branch\0', b'spill\0', b'pushpop\0', b'overwrite\0']
+STRINGS = [b'far pair\0', b'far offset\0', b'far branch\0', b'spill\0', b'pushpop\0', b'overwrite\0',
+           b'below\0', b'viaptr\0']
 
 
 def image():
@@ -44,7 +52,7 @@ def image():
         addrs.append(RODATA + len(rodata))
         rodata += s
     rodata = bytes(rodata)
-    got = b''.join(struct.pack('<I', a) for a in addrs[:2] + addrs[3:6]) + bytes(12)
+    got = b''.join(struct.pack('<I', a) for a in addrs[:2] + addrs[3:8]) + bytes(4)
 
     def word(at, value):
         code[at - TEXT:at - TEXT + 4] = struct.pack('<I', value)
@@ -68,7 +76,7 @@ def image():
 
     for at in range(TEXT, TEXT + len(code), 4):
         word(at, 0xE12FFF1E)
-    funcs = [0x10100, 0x10200, 0x10300, 0x10400, 0x10500, 0x10600]
+    funcs = [0x10100, 0x10200, 0x10300, 0x10400, 0x10500, 0x10600, 0x10700, 0x10780]
     word(TEXT, 0xE92D4000)
     for i, f in enumerate(funcs):
         branch(TEXT + 4 + 4 * i, f, 0xEB000000)
@@ -76,6 +84,9 @@ def image():
     leaf = 0x10080
     word(leaf, 0xE3A03000)
     word(leaf + 4, 0xE12FFF1E)
+    pusher = 0x10090
+    word(pusher, 0xE92D4010)
+    word(pusher + 4, 0xE8BD8010)
 
     def frame(f, body, pool_words):
         """push {r4,r5,lr}; body; pop {r4,r5,pc}; pool after it."""
@@ -127,7 +138,7 @@ def image():
         ldr_pc(at, 3, p)
         add_pc(at + 4, 3, 3)
         word(at + 8, 0xE58D3004)
-        branch(at + 12, leaf, 0xEB000000)
+        word(at + 12, 0xE3A03000)
         at += 16
         if overwrite:
             word(at, 0xE58D0004)
@@ -165,6 +176,40 @@ def image():
         word(p + 4, 0x10)
         return end
     frame(0x10600, overwrite_body, [])
+
+    def below(at):
+        p = at + 4 * 16
+        ldr_pc(at, 3, p)
+        add_pc(at + 4, 3, 3)
+        word(at + 8, 0xE24DD008)
+        word(at + 12, 0xE58D3004)
+        word(at + 16, 0xE28DD008)
+        branch(at + 20, pusher, 0xEB000000)
+        word(at + 24, 0xE24DD008)
+        word(at + 28, 0xE59D2004)
+        ldr_pc(at + 32, 1, p + 4)
+        ldr_reg(at + 36, 0, 2, 1)
+        word(at + 40, 0xE28DD008)
+        word(p, GOT - (at + 4 + 8))
+        word(p + 4, 0x14)
+        return at + 44
+    frame(0x10700, below, [])
+
+    def viaptr(at):
+        p = at + 4 * 16
+        ldr_pc(at, 3, p)
+        add_pc(at + 4, 3, 3)
+        word(at + 8, 0xE58D3004)
+        word(at + 12, 0xE28D1004)
+        word(at + 16, 0xE5810000)
+        word(at + 20, 0xE3A03000)
+        word(at + 24, 0xE59D2004)
+        ldr_pc(at + 28, 1, p + 4)
+        ldr_reg(at + 32, 0, 2, 1)
+        word(p, GOT - (at + 4 + 8))
+        word(p + 4, 0x18)
+        return at + 36
+    frame(0x10780, viaptr, [])
 
     return elf(bytes(code), rodata, got)
 
