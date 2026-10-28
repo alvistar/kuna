@@ -80,8 +80,9 @@
 //! slot at its offset from the stack pointer, re-offset as the pointer moves,
 //! until a store through the stack pointer overwrites it, the pointer takes a
 //! value the fold cannot follow, a call runs, or a store goes through an
-//! address that is not the stack pointer plus a constant (the rules of
-//! [`super::kuna_picbase`]'s stack model); a load of the slot is a base again.
+//! address that is not the stack pointer plus a constant, a known one off the
+//! stack included (stricter than [`super::kuna_picbase`]'s stack model); a
+//! load of the slot is a base again.
 //!
 //! # Joins
 //!
@@ -774,11 +775,10 @@ impl Eval {
 ///
 /// The stack pointer enters as offset 0 from itself, so a store or load through
 /// it names a slot by its offset, and what the pointer holds at the end is how
-/// far the instruction moved it. The rules are [`super::kuna_picbase`]'s: a
-/// call (or a `CALLOTHER`) may write any slot, and so may a store through an
-/// address the fold does not know or that is the stack pointer plus something
-/// other than a constant; a store through a known address that is not the
-/// stack's leaves the slots.
+/// far the instruction moved it. A call (or a `CALLOTHER`) may write any slot,
+/// and so may every store whose address is not the stack pointer plus a
+/// constant: a GOT base or a pool word in the address register may hold only
+/// on some paths into the store, and the slot's deps do not name it.
 fn evaluate(vma: u64, ops: &[FullOp], ins: &[Fact], img: &Image) -> Eval {
     let (mapped, data, got) = (img.mapped, img.data_space, img.got);
     let mut vals: Vec<(Key, Known)> = ins
@@ -854,11 +854,10 @@ fn evaluate(vma: u64, ops: &[FullOp], ins: &[Fact], img: &Image) -> Eval {
                         }
                     }
                 }
-                _ if addr.is_none_or(|a| a.sp) => {
+                _ => {
                     cleared = true;
                     spilled.clear();
                 }
-                _ => {}
             }
         }
         let Some(out) = &op.out else { continue };
@@ -2156,12 +2155,51 @@ mod tests {
         ];
         assert!(spilled_walk(&s, &[derive, through_r1], 4).refs.is_empty());
         assert!(spilled_walk(&s, &[indexed], 4).refs.is_empty());
-        let elsewhere = vec![op(
+    }
+
+    /// A store through a known address off the stack ends every spilled base
+    /// too: a constant, or an absolute address a pool word holds
+    /// (`ldr r3,[pc,#..]; str r0,[r3]`).
+    #[test]
+    fn a_store_through_a_known_address_off_the_stack_ends_every_spilled_base() {
+        let s = spaces();
+        let r3 = vn(&s.reg, 0x2c, 4);
+        let constant = vec![op(
             OpCode::CPUI_STORE,
             None,
             vec![vn(&s.konst, ram_id(&s), 8), vn(&s.konst, 0x900, 4), vn(&s.reg, 0x20, 4)],
         )];
-        assert_eq!(spilled_walk(&s, &[elsewhere], 4).refs.len(), 2, "a known address off the stack");
+        let through_word =
+            vec![op(OpCode::CPUI_STORE, None, vec![vn(&s.konst, ram_id(&s), 8), r3, vn(&s.reg, 0x20, 4)])];
+        let filed = |between: &[Vec<FullOp>]| spilled_walk(&s, between, 4).refs.len();
+        assert_eq!((filed(&[constant]), filed(&[ldr(&s, 0x2c, 0x6a4), through_word])), (0, 0));
+    }
+
+    /// A store through a register that holds a GOT base on the entry edge and
+    /// a stack address on the back edge (`add r5,sp,#4`) may overwrite the
+    /// slot: the meet drops r5 at the loop head, so the store must not have
+    /// left the slot to the reload after it.
+    #[test]
+    fn a_store_through_a_base_the_back_edge_loses_ends_the_spilled_base() {
+        let (s, pool, got) = (spaces(), got_pool(), got_image());
+        let mut w = Walk::new(&s, &pool, &GOT_MAP);
+        w.got = Some(&got);
+        let mov_r5 = vec![op(OpCode::CPUI_COPY, Some(vn(&s.reg, R5, 4)), vec![vn(&s.reg, R4, 4)])];
+        let through_r5 =
+            vec![op(OpCode::CPUI_STORE, None, vec![vn(&s.konst, ram_id(&s), 8), vn(&s.reg, R5, 4), vn(&s.reg, 0x20, 4)])];
+        let r5_on_stack =
+            vec![op(OpCode::CPUI_INT_ADD, Some(vn(&s.reg, R5, 4)), vec![vn(&s.reg, SP, 4), vn(&s.konst, 4, 4)])];
+        w.step(0x600, &ldr(&s, R4, 0x6a0), &[]);
+        w.step(0x604, &add_pc(&s, R4, 0x604), &[]);
+        w.step(0x608, &spill(&s, R4, 4), &[]);
+        w.step(0x60c, &mov_r5, &[]);
+        w.step(0x610, &through_r5, &[]);
+        w.step(0x614, &reload(&s, R4, 4), &[]);
+        w.step(0x618, &ldr(&s, R2, 0x6a4), &[]);
+        w.step(0x61c, &slot_load(&s), &[]);
+        w.step(0x620, &r5_on_stack, &[]);
+        w.step(0x624, &jump(&s, 0x610), &[0x610]);
+        assert!(slot_refs(&w.finish(), 0x61c).is_empty());
     }
 
     /// `push {r4}` and `pop {r4}` around a write of r4 give the base back.
