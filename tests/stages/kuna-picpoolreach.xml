@@ -1,0 +1,65 @@
+<decompilertest>
+<binaryimage arch="x86:LE:64:default:gcc">
+<!--
+    kuna issue testcase: a position-independent ARM function's GOT base or
+    literal-pool word lost by the cross-reference index when it sits far from
+    its use, across a branch, or in a stack slot
+    (`option picpoolreach on|off`, default-ON).
+
+    Issue:      kuna-analysis-picpoolreach - `kuna xrefs` to a GOT slot or a
+                string answered nothing when the `ldr rB,[pc,#..]; add rB,pc,rB`
+                pair, or the GOT offset load, was more than eight instructions
+                from its use or across a branch, or when the base was spilled
+                to the stack and reloaded.
+    Stage:      P1 code/data partition - the on-demand cross-reference query
+                (`listing/xrefs.rs`, `listing/kuna_picpool.rs`).
+    P0 assert:  `option picpoolreach on|off`.
+
+    The Listing tier and the xref query are built only on the real-object
+    bootstrap path, never on the console decompile path (docs/spec/
+    01-program-prep.md section 1.6), and no console command prints an xref
+    row, so a stage test cannot assert the row itself. This case pins what
+    the console can show, as `kuna-armpltslot.xml` does for its option:
+
+      * `option picpoolreach off` parses and round-trips (an unknown option
+        would make the console error and the next decompile would not run),
+      * flipping it changes nothing in the rendered C of `arm_timers`, which
+        reads its callbacks through GOT slots,
+      * the catalog documents it as a default-on P1 option.
+
+    The two-pass proof (option off = the eight-instruction, fall-through-only
+    window and no stack slots, default = the far, branched and spilled values
+    reach their use) lives in the cargo gate `decompiler/crates/kuna-cli/
+    tests/arm_regvalue.rs` (`picpoolreach_off_files_none_of_them` and the
+    default tests), over the authored `arm_regvalue_le32.py` image.
+
+    The XML wrapper only supplies the harness architecture; the pass clears it
+    and loads the real linked ARM fixture (built from
+    decompiler/crates/kuna-analysis/tests/fixtures/gotxref_arm_le32.c).
+-->
+<bytechunk space="ram" offset="0x100000" readonly="true">
+c3
+</bytechunk>
+<symbol space="ram" offset="0x100000" name="harness_stub"/>
+</binaryimage>
+<script>
+  <com>clear architecture</com>
+  <com>load file decompiler/crates/kuna-analysis/tests/fixtures/gotxref_arm_le32</com>
+  <com>read symbols</com>
+  <com>load function arm_timers</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>option picpoolreach off</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>option picpoolreach on</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>phase catalog picpoolreach</com>
+  <com>quit</com>
+</script>
+<stringmatch name="KUNA-PICPOOLREACH #1: the option parses and round-trips in both directions, and is inert on the console path -- arm_timers' first string renders identically in all three passes" min="3" max="3">^  log_msg\("arming timers"\);$</stringmatch>
+<stringmatch name="KUNA-PICPOOLREACH #2: arm_timers' calls through its GOT-read callbacks render identically in all three passes" min="3" max="3">^  set_timeout\(7,on_idle,a0\); // tail-call$</stringmatch>
+<stringmatch name="KUNA-PICPOOLREACH #3: the catalog documents it as a default-on option" min="1" max="1">"option": "picpoolreach", "values": \["on", "off"\], "default": "on"</stringmatch>
+<stringmatch name="KUNA-PICPOOLREACH #4: the catalog row places it in P1 code/data partition" min="1" max="1">"phase": "P1", "subphase": "code-data-partition", "strength": "HARD", "rewind": "P1", "issue": "kuna-analysis-picpoolreach"</stringmatch>
+</decompilertest>

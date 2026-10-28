@@ -2107,7 +2107,9 @@ mod tests {
         // 64-bit local updated with CONCAT44)
         // and kuna-armpltslot, -armcondskip / the ARM xref options parse and are
         // inert on the console path
-        assert_eq!(count, 585, "corpus file count drifted");
+        // and kuna-picpoolreach / the ARM xref reach option parses and is inert
+        // on the console path
+        assert_eq!(count, 586, "corpus file count drifted");
     }
 
     /// ~20 representative SLEIGH spec files across varied processors
